@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+alembic
+apscheduler
+jinja2
+cryptography
+python-multipart
+python-dotenv
+pydantic
+pydantic-settings

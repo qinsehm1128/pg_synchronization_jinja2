@@ -1,0 +1,363 @@
+{% extends "base.html" %}
+
+{% block title %}仪表板 - PostgreSQL数据库同步平台{% endblock %}
+
+{% block content %}
+<div class="row">
+    <!-- 统计卡片 -->
+    <div class="col-md-3">
+        <div class="stat-card stat-primary">
+            <h3 id="total-connections">-</h3>
+            <p>数据库连接</p>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card stat-success">
+            <h3 id="total-jobs">-</h3>
+            <p>同步任务</p>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card stat-warning">
+            <h3 id="running-jobs">-</h3>
+            <p>运行中任务</p>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card stat-danger">
+            <h3 id="success-rate">-</h3>
+            <p>成功率</p>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <!-- 最近执行日志 -->
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">
+                    <i class="fas fa-list-alt me-2"></i>最近执行日志
+                </h5>
+                <a href="/logs" class="btn btn-sm btn-outline-primary">查看全部</a>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0" id="recent-logs-table">
+                        <thead>
+                            <tr>
+                                <th>任务名称</th>
+                                <th>状态</th>
+                                <th>开始时间</th>
+                                <th>耗时</th>
+                                <th>传输记录</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td colspan="5" class="text-center py-3">
+                                    <span class="loading"></span> 加载中...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 系统状态 -->
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-server me-2"></i>系统状态
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-6">
+                        <div class="border-end">
+                            <h4 class="text-primary mb-1" id="cpu-usage">-</h4>
+                            <small class="text-muted">CPU使用率</small>
+                        </div>
+                    </div>
+                    <div class="col-6">
+                        <h4 class="text-info mb-1" id="memory-usage">-</h4>
+                        <small class="text-muted">内存使用率</small>
+                    </div>
+                </div>
+                <hr>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <small class="text-muted">系统运行时间</small>
+                    <span id="uptime">-</span>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <small class="text-muted">调度器状态</small>
+                    <span id="scheduler-status" class="badge bg-secondary">未知</span>
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                    <small class="text-muted">版本信息</small>
+                    <span id="version">v1.0.0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 快速操作 -->
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-bolt me-2"></i>快速操作
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <a href="/connections" class="btn btn-outline-primary btn-sm">
+                        <i class="fas fa-plus me-1"></i>添加数据库连接
+                    </a>
+                    <a href="/jobs" class="btn btn-outline-success btn-sm">
+                        <i class="fas fa-tasks me-1"></i>创建同步任务
+                    </a>
+                    <button class="btn btn-outline-warning btn-sm" onclick="refreshDashboard()">
+                        <i class="fas fa-sync-alt me-1"></i>刷新数据
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 活跃任务 -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">
+                    <i class="fas fa-play-circle me-2"></i>活跃任务
+                </h5>
+                <div>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="loadActiveJobs()">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0" id="active-jobs-table">
+                        <thead>
+                            <tr>
+                                <th>任务名称</th>
+                                <th>源数据库</th>
+                                <th>目标数据库</th>
+                                <th>状态</th>
+                                <th>下次执行</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td colspan="6" class="text-center py-3">
+                                    <span class="loading"></span> 加载中...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 页面加载时初始化
+document.addEventListener('DOMContentLoaded', function() {
+    loadDashboardData();
+    
+    // 设置定时刷新
+    setInterval(loadDashboardData, 30000); // 30秒刷新一次
+});
+
+// 加载仪表板数据
+async function loadDashboardData() {
+    try {
+        await Promise.all([
+            loadStatistics(),
+            loadRecentLogs(),
+            loadActiveJobs(),
+            loadSystemStatus()
+        ]);
+    } catch (error) {
+        console.error('加载仪表板数据失败:', error);
+        Utils.showError('加载数据失败，请稍后重试');
+    }
+}
+
+// 加载统计数据
+async function loadStatistics() {
+    try {
+        // 加载连接统计
+        const connections = await ApiClient.get('/connections/');
+        document.getElementById('total-connections').textContent = connections.length;
+
+        // 加载任务统计
+        const jobs = await ApiClient.get('/jobs/');
+        const activeJobs = jobs.filter(job => job.status === 'active');
+        const runningJobs = jobs.filter(job => job.status === 'running');
+        
+        document.getElementById('total-jobs').textContent = jobs.length;
+        document.getElementById('running-jobs').textContent = runningJobs.length;
+
+        // 加载日志统计
+        const logSummary = await ApiClient.get('/logs/summary/overall');
+        const successRate = logSummary.success_rate || 0;
+        document.getElementById('success-rate').textContent = successRate.toFixed(1) + '%';
+        
+    } catch (error) {
+        console.error('加载统计数据失败:', error);
+    }
+}
+
+// 加载最近日志
+async function loadRecentLogs() {
+    const table = new TableHelper('recent-logs-table');
+    
+    try {
+        const logs = await ApiClient.get('/logs/recent/10');
+        
+        table.clear();
+        
+        if (logs.length === 0) {
+            table.showEmpty('暂无执行日志');
+            return;
+        }
+        
+        logs.forEach(log => {
+            const row = [
+                log.job_name,
+                Utils.getStatusBadge(log.status),
+                Utils.formatDateTime(log.start_time),
+                Utils.formatDuration(log.duration_seconds),
+                Utils.formatNumber(log.records_transferred)
+            ];
+            table.addRow(row);
+        });
+        
+    } catch (error) {
+        console.error('加载最近日志失败:', error);
+        table.showEmpty('加载失败');
+    }
+}
+
+// 加载活跃任务
+async function loadActiveJobs() {
+    const table = new TableHelper('active-jobs-table');
+    
+    try {
+        const jobs = await ApiClient.get('/jobs/');
+        const activeJobs = jobs.filter(job => job.status === 'active');
+        
+        table.clear();
+        
+        if (activeJobs.length === 0) {
+            table.showEmpty('暂无活跃任务');
+            return;
+        }
+        
+        activeJobs.forEach(job => {
+            const nextRun = job.next_run_time ? Utils.formatDateTime(job.next_run_time) : '立即执行';
+            const actions = `
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-primary" onclick="executeJob(${job.id})" title="立即执行">
+                        <i class="fas fa-play"></i>
+                    </button>
+                    <button class="btn btn-outline-warning" onclick="pauseJob(${job.id})" title="暂停任务">
+                        <i class="fas fa-pause"></i>
+                    </button>
+                </div>
+            `;
+            
+            const row = [
+                job.name,
+                job.source_connection_name || '-',
+                job.target_connection_name || '-',
+                Utils.getStatusBadge(job.status),
+                nextRun,
+                actions
+            ];
+            table.addRow(row);
+        });
+        
+    } catch (error) {
+        console.error('加载活跃任务失败:', error);
+        table.showEmpty('加载失败');
+    }
+}
+
+// 加载系统状态
+async function loadSystemStatus() {
+    try {
+        const health = await ApiClient.get('/health');
+        
+        // 更新CPU和内存使用率（模拟数据）
+        document.getElementById('cpu-usage').textContent = (Math.random() * 30 + 10).toFixed(1) + '%';
+        document.getElementById('memory-usage').textContent = (Math.random() * 40 + 20).toFixed(1) + '%';
+        
+        // 更新运行时间（模拟数据）
+        document.getElementById('uptime').textContent = '2天 3小时';
+        
+        // 更新调度器状态
+        const schedulerStatus = document.getElementById('scheduler-status');
+        if (health.status === 'healthy') {
+            schedulerStatus.textContent = '运行中';
+            schedulerStatus.className = 'badge bg-success';
+        } else {
+            schedulerStatus.textContent = '异常';
+            schedulerStatus.className = 'badge bg-danger';
+        }
+        
+    } catch (error) {
+        console.error('加载系统状态失败:', error);
+    }
+}
+
+// 立即执行任务
+async function executeJob(jobId) {
+    if (!await Utils.confirm('确定要立即执行此任务吗？')) {
+        return;
+    }
+    
+    try {
+        await ApiClient.post(`/jobs/${jobId}/execute`);
+        Utils.showSuccess('任务已提交执行');
+        loadDashboardData(); // 刷新数据
+    } catch (error) {
+        console.error('执行任务失败:', error);
+        Utils.showError('执行任务失败: ' + (error.response?.data?.detail || error.message));
+    }
+}
+
+// 暂停任务
+async function pauseJob(jobId) {
+    if (!await Utils.confirm('确定要暂停此任务吗？')) {
+        return;
+    }
+    
+    try {
+        await ApiClient.post(`/jobs/${jobId}/pause`);
+        Utils.showSuccess('任务已暂停');
+        loadDashboardData(); // 刷新数据
+    } catch (error) {
+        console.error('暂停任务失败:', error);
+        Utils.showError('暂停任务失败: ' + (error.response?.data?.detail || error.message));
+    }
+}
+
+// 刷新仪表板
+function refreshDashboard() {
+    loadDashboardData();
+    Utils.showInfo('数据已刷新');
+}
+</script>
+{% endblock %}

@@ -1,0 +1,437 @@
+{% extends "base.html" %}
+
+{% block title %}数据库连接管理 - PostgreSQL数据库同步平台{% endblock %}
+
+{% block content %}
+<!-- 工具栏 -->
+<div class="toolbar">
+    <div class="row align-items-center">
+        <div class="col-md-6">
+            <h4 class="mb-0">
+                <i class="fas fa-database me-2"></i>数据库连接管理
+            </h4>
+        </div>
+        <div class="col-md-6 text-end">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#connectionModal">
+                <i class="fas fa-plus me-1"></i>添加连接
+            </button>
+            <button class="btn btn-outline-secondary" onclick="loadConnections()">
+                <i class="fas fa-sync-alt me-1"></i>刷新
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 连接列表 -->
+<div class="card">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0" id="connections-table">
+                <thead>
+                    <tr>
+                        <th>连接名称</th>
+                        <th>主机</th>
+                        <th>端口</th>
+                        <th>数据库</th>
+                        <th>用户名</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colspan="8" class="text-center py-3">
+                            <span class="loading"></span> 加载中...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- 添加/编辑连接模态框 -->
+<div class="modal fade" id="connectionModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="connectionModalTitle">添加数据库连接</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="connectionForm">
+                    <input type="hidden" id="connectionId">
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="connectionName" class="form-label">连接名称 *</label>
+                                <input type="text" class="form-control" id="connectionName" required>
+                                <div class="form-text">用于识别此连接的友好名称</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="connectionHost" class="form-label">主机地址 *</label>
+                                <input type="text" class="form-control" id="connectionHost" required>
+                                <div class="form-text">PostgreSQL服务器地址</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="connectionPort" class="form-label">端口</label>
+                                <input type="number" class="form-control" id="connectionPort" value="5432">
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="connectionDatabase" class="form-label">数据库名 *</label>
+                                <input type="text" class="form-control" id="connectionDatabase" required>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="connectionUsername" class="form-label">用户名 *</label>
+                                <input type="text" class="form-control" id="connectionUsername" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="connectionPassword" class="form-label">密码 *</label>
+                        <input type="password" class="form-control" id="connectionPassword" required>
+                        <div class="form-text">密码将被加密存储</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="connectionDescription" class="form-label">描述</label>
+                        <textarea class="form-control" id="connectionDescription" rows="2"></textarea>
+                        <div class="form-text">可选的连接描述信息</div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-outline-info" onclick="testConnection()">测试连接</button>
+                <button type="button" class="btn btn-primary" onclick="saveConnection()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 连接详情模态框 -->
+<div class="modal fade" id="connectionDetailModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">连接详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="connectionDetailContent">
+                <!-- 详情内容将通过JavaScript填充 -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let connections = [];
+let editingConnectionId = null;
+
+// 页面加载时初始化
+document.addEventListener('DOMContentLoaded', function() {
+    loadConnections();
+});
+
+// 加载连接列表
+async function loadConnections() {
+    const table = new TableHelper('connections-table');
+    table.showLoading();
+    
+    try {
+        connections = await ApiClient.get('/connections/');
+        
+        table.clear();
+        
+        if (connections.length === 0) {
+            table.showEmpty('暂无数据库连接，请添加第一个连接');
+            return;
+        }
+        
+        connections.forEach(conn => {
+            const statusBadge = conn.is_active ? 
+                '<span class="badge bg-success">激活</span>' : 
+                '<span class="badge bg-secondary">未激活</span>';
+            
+            const actions = `
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-info" onclick="viewConnection(${conn.id})" title="查看详情">
+                        <i class="fas fa-eye"></i>
+                    </button>
+                    <button class="btn btn-outline-primary" onclick="testConnectionById(${conn.id})" title="测试连接">
+                        <i class="fas fa-plug"></i>
+                    </button>
+                    <button class="btn btn-outline-warning" onclick="editConnection(${conn.id})" title="编辑">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <button class="btn btn-outline-danger" onclick="deleteConnection(${conn.id})" title="删除">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            `;
+            
+            const row = [
+                conn.name,
+                conn.host,
+                conn.port,
+                conn.database_name,
+                conn.username,
+                statusBadge,
+                Utils.formatDateTime(conn.created_at),
+                actions
+            ];
+            table.addRow(row);
+        });
+        
+    } catch (error) {
+        console.error('加载连接列表失败:', error);
+        table.showEmpty('加载失败');
+        Utils.showError('加载连接列表失败: ' + (error.response?.data?.detail || error.message));
+    }
+}
+
+// 查看连接详情
+async function viewConnection(connectionId) {
+    try {
+        const conn = await ApiClient.get(`/connections/${connectionId}`);
+        
+        const detailContent = `
+            <div class="row">
+                <div class="col-sm-4"><strong>连接名称:</strong></div>
+                <div class="col-sm-8">${conn.name}</div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>主机地址:</strong></div>
+                <div class="col-sm-8">${conn.host}</div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>端口:</strong></div>
+                <div class="col-sm-8">${conn.port}</div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>数据库:</strong></div>
+                <div class="col-sm-8">${conn.database_name}</div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>用户名:</strong></div>
+                <div class="col-sm-8">${conn.username}</div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>状态:</strong></div>
+                <div class="col-sm-8">
+                    ${conn.is_active ? '<span class="badge bg-success">激活</span>' : '<span class="badge bg-secondary">未激活</span>'}
+                </div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>创建时间:</strong></div>
+                <div class="col-sm-8">${Utils.formatDateTime(conn.created_at)}</div>
+            </div>
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>最后更新:</strong></div>
+                <div class="col-sm-8">${Utils.formatDateTime(conn.updated_at)}</div>
+            </div>
+            ${conn.description ? `
+            <hr>
+            <div class="row">
+                <div class="col-sm-4"><strong>描述:</strong></div>
+                <div class="col-sm-8">${conn.description}</div>
+            </div>
+            ` : ''}
+        `;
+        
+        document.getElementById('connectionDetailContent').innerHTML = detailContent;
+        const modal = new bootstrap.Modal(document.getElementById('connectionDetailModal'));
+        modal.show();
+        
+    } catch (error) {
+        console.error('获取连接详情失败:', error);
+        Utils.showError('获取连接详情失败: ' + (error.response?.data?.detail || error.message));
+    }
+}
+
+// 编辑连接
+async function editConnection(connectionId) {
+    try {
+        const conn = await ApiClient.get(`/connections/${connectionId}`);
+        
+        editingConnectionId = connectionId;
+        
+        // 填充表单
+        document.getElementById('connectionId').value = conn.id;
+        document.getElementById('connectionName').value = conn.name;
+        document.getElementById('connectionHost').value = conn.host;
+        document.getElementById('connectionPort').value = conn.port;
+        document.getElementById('connectionDatabase').value = conn.database_name;
+        document.getElementById('connectionUsername').value = conn.username;
+        document.getElementById('connectionPassword').value = ''; // 不显示密码
+        document.getElementById('connectionDescription').value = conn.description || '';
+        
+        // 更新模态框标题
+        document.getElementById('connectionModalTitle').textContent = '编辑数据库连接';
+        
+        const modal = new bootstrap.Modal(document.getElementById('connectionModal'));
+        modal.show();
+        
+    } catch (error) {
+        console.error('获取连接信息失败:', error);
+        Utils.showError('获取连接信息失败: ' + (error.response?.data?.detail || error.message));
+    }
+}
+
+// 删除连接
+async function deleteConnection(connectionId) {
+    const conn = connections.find(c => c.id === connectionId);
+    if (!conn) return;
+    
+    if (!await Utils.confirm(`确定要删除连接 "${conn.name}" 吗？`)) {
+        return;
+    }
+    
+    try {
+        await ApiClient.delete(`/connections/${connectionId}`);
+        Utils.showSuccess('连接删除成功');
+        loadConnections(); // 刷新列表
+    } catch (error) {
+        console.error('删除连接失败:', error);
+        Utils.showError('删除连接失败: ' + (error.response?.data?.detail || error.message));
+    }
+}
+
+// 测试连接
+async function testConnection() {
+    const formData = getFormData();
+    if (!formData) return;
+    
+    const button = event.target;
+    const originalContent = Utils.showLoading(button);
+    
+    try {
+        const response = await ApiClient.post('/connections/test', formData);
+        
+        if (response.success) {
+            Utils.showSuccess('连接测试成功！');
+        } else {
+            Utils.showError('连接测试失败: ' + response.message);
+        }
+    } catch (error) {
+        console.error('连接测试失败:', error);
+        Utils.showError('连接测试失败: ' + (error.response?.data?.detail || error.message));
+    } finally {
+        Utils.hideLoading(button, originalContent);
+    }
+}
+
+// 通过ID测试连接
+async function testConnectionById(connectionId) {
+    const button = event.target.closest('button');
+    const originalContent = Utils.showLoading(button);
+    
+    try {
+        const response = await ApiClient.post(`/connections/${connectionId}/test`);
+        
+        if (response.success) {
+            Utils.showSuccess('连接测试成功！');
+        } else {
+            Utils.showError('连接测试失败: ' + response.message);
+        }
+    } catch (error) {
+        console.error('连接测试失败:', error);
+        Utils.showError('连接测试失败: ' + (error.response?.data?.detail || error.message));
+    } finally {
+        Utils.hideLoading(button, originalContent);
+    }
+}
+
+// 保存连接
+async function saveConnection() {
+    const formData = getFormData();
+    if (!formData) return;
+    
+    const button = event.target;
+    const originalContent = Utils.showLoading(button);
+    
+    try {
+        if (editingConnectionId) {
+            // 更新连接
+            await ApiClient.put(`/connections/${editingConnectionId}`, formData);
+            Utils.showSuccess('连接更新成功');
+        } else {
+            // 创建新连接
+            await ApiClient.post('/connections/', formData);
+            Utils.showSuccess('连接创建成功');
+        }
+        
+        // 关闭模态框并刷新列表
+        const modal = bootstrap.Modal.getInstance(document.getElementById('connectionModal'));
+        modal.hide();
+        resetForm();
+        loadConnections();
+        
+    } catch (error) {
+        console.error('保存连接失败:', error);
+        Utils.showError('保存连接失败: ' + (error.response?.data?.detail || error.message));
+    } finally {
+        Utils.hideLoading(button, originalContent);
+    }
+}
+
+// 获取表单数据
+function getFormData() {
+    const form = document.getElementById('connectionForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return null;
+    }
+    
+    return {
+        name: document.getElementById('connectionName').value.trim(),
+        host: document.getElementById('connectionHost').value.trim(),
+        port: parseInt(document.getElementById('connectionPort').value) || 5432,
+        database_name: document.getElementById('connectionDatabase').value.trim(),
+        username: document.getElementById('connectionUsername').value.trim(),
+        password: document.getElementById('connectionPassword').value,
+        description: document.getElementById('connectionDescription').value.trim() || null
+    };
+}
+
+// 重置表单
+function resetForm() {
+    document.getElementById('connectionForm').reset();
+    document.getElementById('connectionId').value = '';
+    document.getElementById('connectionPort').value = '5432';
+    document.getElementById('connectionModalTitle').textContent = '添加数据库连接';
+    editingConnectionId = null;
+}
+
+// 模态框关闭时重置表单
+document.getElementById('connectionModal').addEventListener('hidden.bs.modal', function() {
+    resetForm();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block title %}同步任务管理 - PostgreSQL数据库同步平台{% endblock %}
+
+{% block content %}
+<!-- 工具栏 -->
+<div class="toolbar">
+    <div class="row align-items-center">
+        <div class="col-md-6">
+            <h4 class="mb-0">
+                <i class="fas fa-tasks me-2"></i>同步任务管理
+            </h4>
+        </div>
+        <div class="col-md-6 text-end">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#jobModal">
+                <i class="fas fa-plus me-1"></i>创建任务
+            </button>
+            <button class="btn btn-outline-secondary" onclick="loadJobs()">
+                <i class="fas fa-sync-alt me-1"></i>刷新
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 任务列表 -->
+<div class="card">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0" id="jobs-table">
+                <thead>
+                    <tr>
+                        <th>任务名称</th>
+                        <th>源数据库</th>
+                        <th>目标数据库</th>
+                        <th>同步模式</th>
+                        <th>状态</th>
+                        <th>调度计划</th>
+                        <th>下次执行</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colspan="8" class="text-center py-3">
+                            <span class="loading"></span> 加载中...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- 创建/编辑任务模态框 -->
+<div class="modal fade" id="jobModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="jobModalTitle">创建同步任务</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="jobForm">
+                    <input type="hidden" id="jobId">
+                    
+                    <!-- 基本信息 -->
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="jobName" class="form-label">任务名称 *</label>
+                                <input type="text" class="form-control" id="jobName" required>
+                                <div class="form-text">用于标识此同步任务的名称</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="syncMode" class="form-label">同步模式 *</label>
+                                <select class="form-control" id="syncMode" required onchange="toggleSyncMode()">
+                                    <option value="">请选择同步模式</option>
+                                    <option value="full">全量同步</option>
+                                    <option value="incremental">增量同步</option>
+                                </select>
+                                <div class="form-text">全量同步会覆盖目标表，增量同步仅同步变更</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 同步模式详细配置 -->
+                    <div class="row" id="incrementalConfigRow" style="display:none;">
+                        <div class="col-12">
+                            <div class="alert alert-info">
+                                <i class="fas fa-info-circle"></i>
+                                <strong>增量同步说明：</strong>每个表可以独立配置增量同步策略。全局WHERE条件仍然有效，但每表的增量配置优先级更高。
+                            </div>
+                            <div class="mb-3">
+                                <label for="whereCondition" class="form-label">全局WHERE条件（可选）</label>
+                                <textarea class="form-control" id="whereCondition" rows="2" placeholder="例如: status = 'active' (适用于所有表的通用条件)"></textarea>
+                                <div class="form-text">全局WHERE条件，适用于所有表。每表的增量配置会覆盖此设置。</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 冲突处理策略 -->
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="conflictStrategy" class="form-label">冲突处理策略 *</label>
+                                <select class="form-control" id="conflictStrategy" required>
+                                    <option value="error">报错停止（默认）</option>
+                                    <option value="skip">跳过冲突记录</option>
+                                    <option value="replace">替换现有记录</option>
+                                    <option value="ignore">忽略冲突继续</option>
+                                </select>
+                                <div class="form-text">遇到主键冲突时的处理方式</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="executionMode" class="form-label">执行模式 *</label>
+                                <select class="form-control" id="executionMode" required onchange="toggleExecutionMode()">
+                                    <option value="scheduled">定时执行</option>
+                                    <option value="immediate">立即执行</option>
+                                </select>
+                                <div class="form-text">选择任务的执行方式</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 数据库连接 -->
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="sourceConnectionId" class="form-label">源数据库 *</label>
+                                <select class="form-control" id="sourceConnectionId" required>
+                                    <option value="">请选择源数据库</option>
+                                </select>
+                                <div class="form-text">数据来源数据库</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="targetConnectionId" class="form-label">目标数据库 *</label>
+                                <select class="form-control" id="targetConnectionId" required>
+                                    <option value="">请选择目标数据库</option>
+                                </select>
+                                <div class="form-text">数据目标数据库</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 调度配置 -->
+                    <div class="row" id="scheduleConfigRow">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="scheduleType" class="form-label">调度类型 *</label>
+                                <select class="form-control" id="scheduleType" required onchange="toggleScheduleConfig()">
+                                    <option value="">请选择调度类型</option>
+                                    <option value="cron">Cron表达式</option>
+                                    <option value="interval">间隔执行</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-6" id="cronExpressionDiv" style="display:none;">
+                            <div class="mb-3">
+                                <label for="cronExpression" class="form-label">Cron表达式</label>
+                                <input type="text" class="form-control" id="cronExpression" placeholder="0 2 * * *">
+                                <div class="form-text">
+                                    例如: 0 2 * * * (每天凌晨2点)
+                                    <a href="https://crontab.guru/" target="_blank">在线Cron生成器</a>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6" id="intervalDiv" style="display:none;">
+                            <div class="mb-3">
+                                <label for="intervalMinutes" class="form-label">间隔时间(分钟)</label>
+                                <input type="number" class="form-control" id="intervalMinutes" min="1" placeholder="60">
+                                <div class="form-text">执行间隔，单位为分钟</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 表配置 -->
+                    <div class="mb-3">
+                        <label class="form-label">同步表配置 *</label>
+                        <div class="border rounded p-3" style="max-height: 300px; overflow-y: auto;">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span>选择要同步的表:</span>
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadSourceTables()">
+                                    <i class="fas fa-sync-alt me-1"></i>加载表
+                                </button>
+                            </div>
+                            <div id="tablesContainer">
+                                <p class="text-muted text-center">请先选择源数据库，然后点击"加载表"按钮</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="jobDescription" class="form-label">任务描述</label>
+                        <textarea class="form-control" id="jobDescription" rows="2"></textarea>
+                        <div class="form-text">可选的任务描述信息</div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveJob()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 任务详情模态框 -->
+<div class="modal fade" id="jobDetailModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">任务详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="jobDetailContent">
+                <!-- 详情内容将通过JavaScript填充 -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/jobs.js"></script>
+{% endblock %}

@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+
+{% block title %}执行日志 - PostgreSQL数据库同步平台{% endblock %}
+
+{% block content %}
+<!-- 工具栏 -->
+<div class="toolbar">
+    <div class="row align-items-center">
+        <div class="col-md-6">
+            <h4 class="mb-0">
+                <i class="fas fa-list-alt me-2"></i>执行日志
+            </h4>
+        </div>
+        <div class="col-md-6 text-end">
+            <div class="btn-group">
+                <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                    <i class="fas fa-filter me-1"></i>筛选
+                </button>
+                <ul class="dropdown-menu">
+                    <li><a class="dropdown-item" href="#" onclick="filterLogs('all')">全部日志</a></li>
+                    <li><a class="dropdown-item" href="#" onclick="filterLogs('success')">成功</a></li>
+                    <li><a class="dropdown-item" href="#" onclick="filterLogs('failed')">失败</a></li>
+                    <li><a class="dropdown-item" href="#" onclick="filterLogs('running')">运行中</a></li>
+                </ul>
+            </div>
+            <button class="btn btn-outline-secondary" onclick="loadLogs()">
+                <i class="fas fa-sync-alt me-1"></i>刷新
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 统计卡片 -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h4 class="text-primary" id="total-executions">-</h4>
+                <small class="text-muted">总执行次数</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h4 class="text-success" id="successful-executions">-</h4>
+                <small class="text-muted">成功次数</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h4 class="text-danger" id="failed-executions">-</h4>
+                <small class="text-muted">失败次数</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h4 class="text-info" id="success-rate">-</h4>
+                <small class="text-muted">成功率</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 日志列表 -->
+<div class="card">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0" id="logs-table">
+                <thead>
+                    <tr>
+                        <th>任务名称</th>
+                        <th>状态</th>
+                        <th>开始时间</th>
+                        <th>结束时间</th>
+                        <th>耗时</th>
+                        <th>处理表数</th>
+                        <th>传输记录</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colspan="8" class="text-center py-3">
+                            <span class="loading"></span> 加载中...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="card-footer">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <small class="text-muted">
+                    显示第 <span id="current-page">1</span> 页，共 <span id="total-pages">1</span> 页
+                </small>
+            </div>
+            <nav>
+                <ul class="pagination pagination-sm mb-0" id="pagination">
+                    <!-- 分页按钮将通过JavaScript生成 -->
+                </ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+<!-- 日志详情模态框 -->
+<div class="modal fade" id="logDetailModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">执行日志详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="logDetailContent">
+                <!-- 详情内容将通过JavaScript填充 -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 日志清理模态框 -->
+<div class="modal fade" id="cleanupModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">清理历史日志</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="cleanupForm">
+                    <div class="mb-3">
+                        <label for="jobSelect" class="form-label">选择任务</label>
+                        <select class="form-control" id="jobSelect" required>
+                            <option value="">请选择要清理的任务</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="keepLatest" class="form-label">保留最新记录数</label>
+                        <input type="number" class="form-control" id="keepLatest" value="10" min="1" max="100">
+                        <div class="form-text">将保留最新的N条日志记录，删除其余历史记录</div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" onclick="performCleanup()">确认清理</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 浮动操作按钮 -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1000;">
+    <div class="btn-group-vertical">
+        <button class="btn btn-warning btn-sm rounded-circle mb-2" data-bs-toggle="modal" data-bs-target="#cleanupModal" title="清理历史日志">
+            <i class="fas fa-broom"></i>
+        </button>
+        <button class="btn btn-info btn-sm rounded-circle" onclick="exportLogs()" title="导出日志">
+            <i class="fas fa-download"></i>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/logs.js"></script>
+{% endblock %}
