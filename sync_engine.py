@@ -8,7 +8,7 @@ import traceback
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from sqlalchemy import create_engine, text, MetaData, Table
+from sqlalchemy import create_engine, text, MetaData, Table, Column
 from sqlalchemy.orm import Session
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import func
@@ -256,7 +256,7 @@ class SyncEngine:
         """安全地创建表结构，避免GIN索引问题"""
         try:
             # 首先创建必要的序列
-            self._create_sequences(source_table, schema_name, table_name)
+            failed_columns = self._create_sequences(source_table, schema_name, table_name)
             
             # 创建目标表的元数据，但不包含索引
             dest_metadata = MetaData()
@@ -268,11 +268,26 @@ class SyncEngine:
                 schema=schema_name
             )
             
-            # 复制列定义
+            # 复制列定义，处理序列创建失败的列
             for column in source_table.columns:
                 # 创建新列，但不复制索引相关属性
                 new_column = column.copy()
                 new_column.index = False  # 禁用自动索引创建
+                
+                # 如果该列的序列创建失败，转换为BIGSERIAL
+                if column.name in failed_columns:
+                    logger.info(f"Converting column {column.name} to BIGSERIAL due to sequence creation failure")
+                    # 将列类型转换为BIGSERIAL（自动递增的BIGINT）
+                    from sqlalchemy import BigInteger
+                    new_column = Column(
+                        column.name,
+                        BigInteger,
+                        primary_key=column.primary_key,
+                        nullable=column.nullable,
+                        autoincrement=True
+                    )
+                    new_column.index = False
+                
                 dest_table.append_column(new_column)
             
             # 复制主键约束
@@ -367,8 +382,9 @@ class SyncEngine:
         
         return False
      
-    def _create_sequences(self, source_table, schema_name: str, table_name: str):
-         """创建表所需的序列"""
+    def _create_sequences(self, source_table, schema_name: str, table_name: str) -> dict:
+         """创建表所需的序列，返回失败的列信息"""
+         failed_columns = {}
          try:
              with self.destination_engine.connect() as conn:
                  with conn.begin():
@@ -380,33 +396,52 @@ class SyncEngine:
                              # 检查是否使用nextval函数（序列）
                              if 'nextval' in default_str.lower():
                                  # 提取序列名
-                                 sequence_name = self._extract_sequence_name(default_str, schema_name, table_name, column.name)
+                                 full_sequence_name, sequence_name = self._extract_sequence_name(default_str, schema_name, table_name, column.name)
                                  
                                  if sequence_name:
-                                     # 检查序列是否已存在
-                                     check_seq_sql = f"""
-                                     SELECT EXISTS (
-                                         SELECT 1 FROM information_schema.sequences 
-                                         WHERE sequence_schema = '{schema_name}' 
-                                         AND sequence_name = '{sequence_name}'
-                                     )
-                                     """
-                                     
-                                     result = conn.execute(text(check_seq_sql)).scalar()
-                                     
-                                     if not result:
-                                         # 创建序列
-                                         create_seq_sql = f"CREATE SEQUENCE {schema_name}.{sequence_name}"
-                                         conn.execute(text(create_seq_sql))
-                                         logger.info(f"Created sequence {schema_name}.{sequence_name}")
-                                     else:
-                                         logger.info(f"Sequence {schema_name}.{sequence_name} already exists")
+                                     try:
+                                         # 解析完整序列名的schema和名称
+                                         if '.' in full_sequence_name:
+                                             seq_schema, seq_name = full_sequence_name.split('.', 1)
+                                         else:
+                                             seq_schema, seq_name = schema_name, sequence_name
+                                         
+                                         # 检查序列是否已存在
+                                         check_seq_sql = f"""
+                                         SELECT EXISTS (
+                                             SELECT 1 FROM information_schema.sequences 
+                                             WHERE sequence_schema = '{seq_schema}' 
+                                             AND sequence_name = '{seq_name}'
+                                         )
+                                         """
+                                         
+                                         result = conn.execute(text(check_seq_sql)).scalar()
+                                         
+                                         if not result:
+                                             # 创建序列
+                                             create_seq_sql = f"CREATE SEQUENCE {full_sequence_name}"
+                                             conn.execute(text(create_seq_sql))
+                                             logger.info(f"Created sequence {full_sequence_name}")
+                                         else:
+                                             logger.info(f"Sequence {full_sequence_name} already exists")
+                                             
+                                     except Exception as seq_error:
+                                         logger.warning(f"Failed to create sequence {full_sequence_name}: {seq_error}")
+                                         # 记录失败的列，稍后转换为BIGSERIAL
+                                         failed_columns[column.name] = {
+                                             'column': column,
+                                             'sequence_name': full_sequence_name,
+                                             'error': str(seq_error),
+                                             'default_str': default_str
+                                         }
                                          
          except Exception as e:
              logger.warning(f"Failed to create sequences for {schema_name}.{table_name}: {e}")
+             
+         return failed_columns
      
-    def _extract_sequence_name(self, default_str: str, schema_name: str, table_name: str, column_name: str) -> str:
-         """从默认值字符串中提取序列名"""
+    def _extract_sequence_name(self, default_str: str, schema_name: str, table_name: str, column_name: str) -> tuple:
+         """从默认值字符串中提取序列名，返回(完整序列名, 序列名)"""
          try:
              # 常见的序列命名模式
              if 'nextval' in default_str.lower():
@@ -424,7 +459,6 @@ class SyncEngine:
                      r"nextval\(\"([^\"]+)\".*\)"  # 双引号模式
                  ]
                  
-                 sequence_name = None
                  for pattern in patterns:
                      match = re.search(pattern, default_str)
                      if match:
@@ -432,25 +466,28 @@ class SyncEngine:
                          # 清理可能的转义字符和引号
                          full_sequence_name = full_sequence_name.replace('\\"', '').replace('"', '')
                          
-                         # 如果包含schema，提取序列名部分
+                         # 如果包含schema，分别提取schema和序列名
                          if '.' in full_sequence_name:
-                             sequence_name = full_sequence_name.split('.')[-1]
+                             parts = full_sequence_name.split('.')
+                             extracted_schema = parts[0]
+                             sequence_name = parts[-1]
+                             # 返回完整名称和序列名
+                             return f"{extracted_schema}.{sequence_name}", sequence_name
                          else:
-                             sequence_name = full_sequence_name
-                         break
+                             # 没有schema，使用当前schema
+                             return f"{schema_name}.{full_sequence_name}", full_sequence_name
                  
-                 if sequence_name:
-                     return sequence_name
-                 else:
-                     # 如果无法解析，使用标准命名约定
-                     return f"{table_name}_{column_name}_seq"
+                 # 如果无法解析，使用标准命名约定
+                 standard_name = f"{table_name}_{column_name}_seq"
+                 return f"{schema_name}.{standard_name}", standard_name
              
-             return None
+             return None, None
              
          except Exception as e:
              logger.warning(f"Failed to extract sequence name from {default_str}: {e}")
              # 返回标准命名约定
-             return f"{table_name}_{column_name}_seq"
+             standard_name = f"{table_name}_{column_name}_seq"
+             return f"{schema_name}.{standard_name}", standard_name
      
     def _sync_table_data(self, target_table) -> int:
         """
