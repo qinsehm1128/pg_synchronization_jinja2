@@ -608,49 +608,8 @@ async function loadSourceTables() {
             return;
         }
         
-        const syncMode = document.getElementById('syncMode').value;
-        const isIncremental = syncMode === 'incremental';
-        
-        const tablesHtml = sourceTables.map((table, index) => {
-            const incrementalConfig = isIncremental ? `
-                <div class="mt-2 ms-4" id="incremental_config_${index}" style="display: none;">
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <label class="form-label text-muted small">增量策略:</label>
-                            <select class="form-select form-select-sm" id="strategy_${index}" onchange="toggleIncrementalFields(${index})">
-                                <option value="none">无增量</option>
-                                <option value="auto_id">自动ID</option>
-                                <option value="auto_timestamp">自动时间戳</option>
-                                <option value="custom_condition">自定义条件</option>
-                            </select>
-                        </div>
-                        <div class="col-md-4" id="field_container_${index}" style="display: none;">
-                            <label class="form-label text-muted small">增量字段:</label>
-                            <input type="text" class="form-control form-control-sm" id="field_${index}" placeholder="字段名">
-                        </div>
-                        <div class="col-md-4" id="condition_container_${index}" style="display: none;">
-                            <label class="form-label text-muted small">自定义条件:</label>
-                            <input type="text" class="form-control form-control-sm" id="condition_${index}" placeholder="WHERE条件">
-                        </div>
-                    </div>
-                </div>
-            ` : '';
-            
-            return `
-                <div class="border rounded p-2 mb-2">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" value="${table.full_name}" id="table_${index}" onchange="toggleTableConfig(${index})">
-                        <label class="form-check-label" for="table_${index}">
-                            <strong>${table.full_name}</strong>
-                            <small class="text-muted d-block">Owner: ${table.table_owner}</small>
-                        </label>
-                    </div>
-                    ${incrementalConfig}
-                </div>
-            `;
-        }).join('');
-        
-        container.innerHTML = tablesHtml;
+        // 渲染表格列表（包含搜索框）
+        renderTablesWithFilter();
         
     } catch (error) {
         console.error('加载源数据库表失败:', error);
@@ -658,6 +617,93 @@ async function loadSourceTables() {
         document.getElementById('tablesContainer').innerHTML = '<p class="text-danger text-center">加载失败</p>';
     }
 }
+
+// 渲染表格列表（带筛选功能）
+function renderTablesWithFilter(filterText = '') {
+    const container = document.getElementById('tablesContainer');
+    const syncMode = document.getElementById('syncMode').value;
+    const isIncremental = syncMode === 'incremental';
+    
+    // 筛选表格
+    const filteredTables = sourceTables.filter(table => 
+        table.full_name.toLowerCase().includes(filterText.toLowerCase()) ||
+        table.table_owner.toLowerCase().includes(filterText.toLowerCase())
+    );
+    
+    // 构建搜索框HTML
+    const searchBoxHtml = `
+        <div class="mb-3">
+            <div class="input-group input-group-sm">
+                <span class="input-group-text"><i class="fas fa-search"></i></span>
+                <input type="text" class="form-control" id="tableSearchInput" 
+                       placeholder="搜索表名或所有者..." value="${filterText}"
+                       oninput="filterTables(this.value)">
+                <button class="btn btn-outline-secondary" type="button" onclick="clearTableFilter()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <small class="text-muted">找到 ${filteredTables.length} 个表（共 ${sourceTables.length} 个）</small>
+        </div>
+    `;
+    
+    if (filteredTables.length === 0) {
+        container.innerHTML = searchBoxHtml + '<p class="text-muted text-center">没有找到匹配的表</p>';
+        return;
+    }
+    
+    const tablesHtml = filteredTables.map((table, index) => {
+        const originalIndex = sourceTables.findIndex(t => t.full_name === table.full_name);
+        const incrementalConfig = isIncremental ? `
+            <div class="mt-2 ms-4" id="incremental_config_${originalIndex}" style="display: none;">
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <label class="form-label text-muted small">增量策略:</label>
+                        <select class="form-select form-select-sm" id="strategy_${originalIndex}" onchange="toggleIncrementalFields(${originalIndex})">
+                            <option value="none">无增量</option>
+                            <option value="auto_id">自动ID</option>
+                            <option value="auto_timestamp">自动时间戳</option>
+                            <option value="custom_condition">自定义条件</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4" id="field_container_${originalIndex}" style="display: none;">
+                        <label class="form-label text-muted small">增量字段:</label>
+                        <input type="text" class="form-control form-control-sm" id="field_${originalIndex}" placeholder="字段名">
+                    </div>
+                    <div class="col-md-4" id="condition_container_${originalIndex}" style="display: none;">
+                        <label class="form-label text-muted small">自定义条件:</label>
+                        <input type="text" class="form-control form-control-sm" id="condition_${originalIndex}" placeholder="WHERE条件">
+                    </div>
+                </div>
+            </div>
+        ` : '';
+        
+        return `
+            <div class="border rounded p-2 mb-2 table-item" data-table-name="${table.full_name}">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="${table.full_name}" id="table_${originalIndex}" onchange="toggleTableConfig(${originalIndex})">
+                    <label class="form-check-label" for="table_${originalIndex}">
+                        <strong>${table.full_name}</strong>
+                        <small class="text-muted d-block">Owner: ${table.table_owner}</small>
+                    </label>
+                </div>
+                ${incrementalConfig}
+            </div>
+        `;
+    }).join('');
+    
+    container.innerHTML = searchBoxHtml + tablesHtml;
+}
+
+// 筛选表格
+function filterTables(filterText) {
+    renderTablesWithFilter(filterText);
+}
+
+// 清除筛选
+ function clearTableFilter() {
+     document.getElementById('tableSearchInput').value = '';
+     renderTablesWithFilter('');
+ }
 
 // 获取选中的表格
 function getSelectedTables() {
@@ -806,14 +852,40 @@ document.getElementById('jobModal').addEventListener('hidden.bs.modal', function
 });
 
 // 设置时间范围条件
-function setTimeRangeCondition(months) {
+function setTimeRangeCondition(timeRange) {
     const whereConditionElement = document.getElementById('whereCondition');
     if (!whereConditionElement) return;
     
-    if (months === 0) {
+    if (timeRange === 'clear') {
         // 清除条件
         whereConditionElement.value = '';
+        Utils.showSuccess('已清除时间范围条件');
         return;
+    }
+    
+    // 解析时间范围参数
+    let months;
+    let displayText;
+    switch(timeRange) {
+        case '1_year':
+            months = 12;
+            displayText = '1年';
+            break;
+        case '6_months':
+            months = 6;
+            displayText = '6个月';
+            break;
+        case '3_months':
+            months = 3;
+            displayText = '3个月';
+            break;
+        case '1_month':
+            months = 1;
+            displayText = '1个月';
+            break;
+        default:
+            Utils.showError('无效的时间范围参数');
+            return;
     }
     
     // 计算时间范围
@@ -829,7 +901,6 @@ function setTimeRangeCondition(months) {
     };
     
     const startDateStr = formatDate(startDate);
-    const endDateStr = formatDate(endDate);
     
     // 生成WHERE条件（使用通用的时间字段名）
     const condition = `(
@@ -844,5 +915,5 @@ function setTimeRangeCondition(months) {
     whereConditionElement.value = condition;
     
     // 显示提示信息
-    Utils.showSuccess(`已设置${months}个月前至今的时间范围条件`);
+    Utils.showSuccess(`已设置${displayText}前至今的时间范围条件`);
 }
