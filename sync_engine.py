@@ -255,8 +255,11 @@ class SyncEngine:
     def _create_table_safely(self, source_table, schema_name: str, table_name: str):
         """安全地创建表结构，避免GIN索引问题"""
         try:
+            logger.info(f"Starting safe table creation for {schema_name}.{table_name}")
+            
             # 首先创建必要的序列
             failed_columns = self._create_sequences(source_table, schema_name, table_name)
+            logger.info(f"Sequence creation completed. Failed columns: {list(failed_columns.keys())}")
             
             # 创建目标表的元数据，但不包含索引
             dest_metadata = MetaData()
@@ -269,10 +272,15 @@ class SyncEngine:
             )
             
             # 复制列定义，处理序列创建失败的列
+            logger.info(f"Processing {len(source_table.columns)} columns for table {schema_name}.{table_name}")
             for column in source_table.columns:
+                logger.info(f"Processing column: {column.name}, type: {column.type}, default: {column.default}")
+                
                 # 如果该列的序列创建失败，转换为BIGSERIAL
                 if column.name in failed_columns:
                     logger.info(f"Converting column {column.name} to BIGSERIAL due to sequence creation failure")
+                    logger.info(f"Original column default: {column.default}")
+                    
                     # 将列类型转换为BIGSERIAL（自动递增的BIGINT）
                     from sqlalchemy import BigInteger
                     new_column = Column(
@@ -284,10 +292,12 @@ class SyncEngine:
                         default=None  # 移除原始的nextval默认值
                     )
                     new_column.index = False
+                    logger.info(f"Created BIGSERIAL column: {column.name}, autoincrement: {new_column.autoincrement}, default: {new_column.default}")
                 else:
                     # 创建新列，但不复制索引相关属性
                     new_column = column.copy()
                     new_column.index = False  # 禁用自动索引创建
+                    logger.info(f"Copied column: {column.name}, type: {new_column.type}, default: {new_column.default}")
                 
                 dest_table.append_column(new_column)
             
@@ -305,20 +315,25 @@ class SyncEngine:
                     logger.warning(f"Failed to copy foreign key constraint: {fk_error}")
             
             # 创建表（不包含索引）
+            logger.info(f"Creating table {schema_name}.{table_name} with {len(dest_table.columns)} columns")
             dest_metadata.create_all(self.destination_engine)
+            logger.info(f"Table {schema_name}.{table_name} created successfully")
             
             # 单独创建安全的索引
             self._create_safe_indexes(source_table, schema_name, table_name)
             
         except Exception as e:
             logger.error(f"Failed to create table safely: {e}")
+            logger.error(f"Exception details: {traceback.format_exc()}")
             # 如果安全创建失败，尝试原始方法
             try:
+                logger.warning(f"Attempting fallback table creation for {schema_name}.{table_name}")
                 dest_metadata = MetaData()
                 dest_table = source_table.tometadata(dest_metadata, schema=schema_name)
                 dest_metadata.create_all(self.destination_engine)
                 logger.warning(f"Fallback to original table creation method for {schema_name}.{table_name}")
             except Exception as fallback_error:
+                logger.error(f"Fallback table creation also failed: {fallback_error}")
                 raise Exception(f"Both safe and fallback table creation failed: {fallback_error}")
     
     def _create_safe_indexes(self, source_table, schema_name: str, table_name: str):
