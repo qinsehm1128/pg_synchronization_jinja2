@@ -12,6 +12,14 @@ from models.database_connections import DatabaseConnection
 from scheduler import scheduler_manager
 from progress_manager import progress_manager
 
+# 立即执行任务
+# from sync.sync_engine import execute_sync_job
+from sync import execute_sync_job
+import threading
+
+
+
+
 router = APIRouter()
 
 # Pydantic模型
@@ -281,8 +289,6 @@ async def create_job(
         
         # 如果是立即执行模式，立即启动任务
         if backup_job.execution_mode == ExecutionMode.IMMEDIATE:
-            from sync_engine import execute_sync_job
-            import threading
             thread = threading.Thread(target=execute_sync_job, args=(backup_job.id, progress_manager.update_progress))
             thread.start()
         
@@ -401,8 +407,6 @@ async def update_job(
         
         # 如果切换为立即执行模式，立即启动任务
         if 'execution_mode' in update_data and update_data['execution_mode'] == ExecutionMode.IMMEDIATE:
-            from sync_engine import execute_sync_job
-            import threading
             thread = threading.Thread(target=execute_sync_job, args=(job_id, progress_manager.update_progress))
             thread.start()
         
@@ -507,9 +511,7 @@ async def run_job_now(job_id: int, db: Session = Depends(get_db)):
         )
     
     try:
-        # 立即执行任务
-        from sync_engine import execute_sync_job
-        import threading
+
         
         # 在后台线程中执行，避免阻塞API响应
         thread = threading.Thread(target=execute_sync_job, args=(job_id, progress_manager.update_progress))

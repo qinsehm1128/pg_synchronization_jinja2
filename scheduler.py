@@ -6,14 +6,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
-from datetime import datetime
-from sqlalchemy.orm import Session
 
 from config import settings
-from database import get_db, SessionLocal, engine
+from database import SessionLocal, engine
 from models.backup_jobs import BackupJob, JobStatus, ExecutionMode
-from models.job_execution_logs import JobExecutionLog, ExecutionStatus
-from sync_engine import execute_sync_job
+
+# from sync.sync_engine import execute_sync_job
+
+from sync import execute_sync_job
+
+
+
 from sqlalchemy import text
 from progress_manager import progress_manager
 
