@@ -804,3 +804,45 @@ function resetForm() {
 document.getElementById('jobModal').addEventListener('hidden.bs.modal', function() {
     resetForm();
 });
+
+// 设置时间范围条件
+function setTimeRangeCondition(months) {
+    const whereConditionElement = document.getElementById('whereCondition');
+    if (!whereConditionElement) return;
+    
+    if (months === 0) {
+        // 清除条件
+        whereConditionElement.value = '';
+        return;
+    }
+    
+    // 计算时间范围
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setMonth(startDate.getMonth() - months);
+    
+    // 格式化日期为 YYYY-MM-DD
+    const formatDate = (date) => {
+        return date.getFullYear() + '-' + 
+               String(date.getMonth() + 1).padStart(2, '0') + '-' + 
+               String(date.getDate()).padStart(2, '0');
+    };
+    
+    const startDateStr = formatDate(startDate);
+    const endDateStr = formatDate(endDate);
+    
+    // 生成WHERE条件（使用通用的时间字段名）
+    const condition = `(
+        created_at >= '${startDateStr}' OR 
+        updated_at >= '${startDateStr}' OR 
+        create_time >= '${startDateStr}' OR 
+        update_time >= '${startDateStr}' OR 
+        timestamp >= '${startDateStr}' OR 
+        date >= '${startDateStr}'
+    )`;
+    
+    whereConditionElement.value = condition;
+    
+    // 显示提示信息
+    Utils.showSuccess(`已设置${months}个月前至今的时间范围条件`);
+}

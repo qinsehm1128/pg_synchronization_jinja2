@@ -540,48 +540,61 @@ class SyncEngine:
         table_name = target_table.table_name
         full_table_name = f"{schema_name}.{table_name}"
         
-        # 如果是全量同步模式或表的增量策略为NONE，直接返回全表查询
-        if (self.job.sync_mode == SyncMode.FULL or 
-            target_table.incremental_strategy == IncrementalStrategy.NONE):
-            return f"SELECT * FROM {full_table_name}"
+        # 构建基础查询
+        base_query = f"SELECT * FROM {full_table_name}"
+        conditions = []
+        order_by = ""
         
-        # 增量同步逻辑
-        if target_table.incremental_strategy == IncrementalStrategy.CUSTOM_CONDITION:
-            # 使用表级自定义条件
-            if target_table.custom_condition:
-                return f"SELECT * FROM {full_table_name} WHERE {target_table.custom_condition}"
-            else:
-                self._update_log(f"警告：表 {full_table_name} 设置了自定义条件策略但未提供条件，将执行全量同步")
-                return f"SELECT * FROM {full_table_name}"
-        
-        elif target_table.incremental_strategy == IncrementalStrategy.AUTO_ID:
-            # 自动基于ID字段增量
-            id_field = target_table.incremental_field or self._detect_id_field(schema_name, table_name)
-            if id_field:
-                last_value = self._get_last_sync_value(target_table, id_field)
-                condition = f"{id_field} > {last_value}" if last_value else f"{id_field} IS NOT NULL"
-                return f"SELECT * FROM {full_table_name} WHERE {condition} ORDER BY {id_field}"
-            else:
-                self._update_log(f"警告：表 {full_table_name} 未找到ID字段，将执行全量同步")
-                return f"SELECT * FROM {full_table_name}"
-        
-        elif target_table.incremental_strategy == IncrementalStrategy.AUTO_TIMESTAMP:
-            # 自动基于时间戳字段增量
-            timestamp_field = target_table.incremental_field or self._detect_timestamp_field(schema_name, table_name)
-            if timestamp_field:
-                last_value = self._get_last_sync_value(target_table, timestamp_field)
-                if last_value:
-                    condition = f"{timestamp_field} > '{last_value}'"
+        # 处理增量同步逻辑
+        if (self.job.sync_mode == SyncMode.INCREMENTAL and 
+            target_table.incremental_strategy != IncrementalStrategy.NONE):
+            
+            if target_table.incremental_strategy == IncrementalStrategy.CUSTOM_CONDITION:
+                # 使用表级自定义条件
+                if target_table.custom_condition:
+                    conditions.append(target_table.custom_condition)
                 else:
-                    # 如果没有上次同步的时间，使用最近24小时的数据
-                    condition = f"{timestamp_field} >= NOW() - INTERVAL '24 hours'"
-                return f"SELECT * FROM {full_table_name} WHERE {condition} ORDER BY {timestamp_field}"
-            else:
-                self._update_log(f"警告：表 {full_table_name} 未找到时间戳字段，将执行全量同步")
-                return f"SELECT * FROM {full_table_name}"
+                    self._update_log(f"警告：表 {full_table_name} 设置了自定义条件策略但未提供条件")
+            
+            elif target_table.incremental_strategy == IncrementalStrategy.AUTO_ID:
+                # 自动基于ID字段增量
+                id_field = target_table.incremental_field or self._detect_id_field(schema_name, table_name)
+                if id_field:
+                    last_value = self._get_last_sync_value(target_table, id_field)
+                    condition = f"{id_field} > {last_value}" if last_value else f"{id_field} IS NOT NULL"
+                    conditions.append(condition)
+                    order_by = f" ORDER BY {id_field}"
+                else:
+                    self._update_log(f"警告：表 {full_table_name} 未找到ID字段")
+            
+            elif target_table.incremental_strategy == IncrementalStrategy.AUTO_TIMESTAMP:
+                # 自动基于时间戳字段增量
+                timestamp_field = target_table.incremental_field or self._detect_timestamp_field(schema_name, table_name)
+                if timestamp_field:
+                    last_value = self._get_last_sync_value(target_table, timestamp_field)
+                    if last_value:
+                        condition = f"{timestamp_field} > '{last_value}'"
+                    else:
+                        # 如果没有上次同步的时间，使用最近24小时的数据
+                        condition = f"{timestamp_field} >= NOW() - INTERVAL '24 hours'"
+                    conditions.append(condition)
+                    order_by = f" ORDER BY {timestamp_field}"
+                else:
+                    self._update_log(f"警告：表 {full_table_name} 未找到时间戳字段")
         
-        # 默认情况
-        return f"SELECT * FROM {full_table_name}"
+        # 处理全局WHERE条件
+        if self.job.where_condition and self.job.where_condition.strip():
+            global_condition = self.job.where_condition.strip()
+            # 如果全局条件不为空，添加到条件列表
+            conditions.append(f"({global_condition})")
+            self._update_log(f"应用全局WHERE条件到表 {full_table_name}: {global_condition}")
+        
+        # 构建最终查询
+        if conditions:
+            where_clause = " WHERE " + " AND ".join(conditions)
+            return base_query + where_clause + order_by
+        else:
+            return base_query + order_by
     
     def _detect_id_field(self, schema_name: str, table_name: str) -> str:
         """检测ID字段"""

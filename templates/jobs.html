@@ -95,7 +95,23 @@
                             <div class="mb-3">
                                 <label for="whereCondition" class="form-label">全局WHERE条件（可选）</label>
                                 <textarea class="form-control" id="whereCondition" rows="2" placeholder="例如: status = 'active' (适用于所有表的通用条件)"></textarea>
-                                <div class="form-text">全局WHERE条件，适用于所有表。每表的增量配置会覆盖此设置。</div>
+                                <div class="form-text mb-2">全局WHERE条件，适用于所有表。每表的增量配置会覆盖此设置。</div>
+                                
+                                <!-- 时间范围快捷选项 -->
+                                <div class="mb-2">
+                                    <label class="form-label small">时间范围快捷选项：</label>
+                                    <div class="btn-group-sm" role="group">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm me-1" onclick="setTimeRangeCondition('1_year')">1年前至今</button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm me-1" onclick="setTimeRangeCondition('6_months')">6个月前至今</button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm me-1" onclick="setTimeRangeCondition('3_months')">3个月前至今</button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm me-1" onclick="setTimeRangeCondition('1_month')">1个月前至今</button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="setTimeRangeCondition('clear')">清除</button>
+                                    </div>
+                                </div>
+                                <div class="form-text small text-muted">
+                                    <i class="fas fa-info-circle"></i> 
+                                    时间范围条件会自动检测表中的时间字段（如 created_at, updated_at, timestamp 等）
+                                </div>
                             </div>
                         </div>
                     </div>
