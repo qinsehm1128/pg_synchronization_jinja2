@@ -35,9 +35,10 @@ function connectToJobProgress(jobId) {
     eventSource.onmessage = function(event) {
         try {
             const progress = JSON.parse(event.data);
+            console.log('收到SSE进度数据:', progress); // 添加调试日志
             updateProgressDisplay(jobId, progress);
         } catch (error) {
-            console.error('解析进度数据失败:', error);
+            console.error('解析进度数据失败:', error, 'Raw data:', event.data);
         }
     };
     
@@ -59,32 +60,95 @@ function connectToJobProgress(jobId) {
 
 // 更新进度显示
 function updateProgressDisplay(jobId, progress) {
+    console.log('更新进度显示 - JobID:', jobId, 'Progress:', progress); // 添加调试日志
+    
     // 在日志表格中找到对应的行并更新进度
     const table = document.getElementById('logs-table');
-    if (!table) return;
+    if (!table) {
+        console.log('未找到日志表格');
+        return;
+    }
     
     const rows = table.querySelectorAll('tbody tr');
-    rows.forEach(row => {
+    console.log('找到表格行数:', rows.length);
+    
+    // 查找当前正在运行的任务
+    const runningLog = logs.find(log => log.job_id === jobId && log.status === 'running');
+    if (!runningLog) {
+        console.log('未找到正在运行的任务，JobID:', jobId);
+        return;
+    }
+    
+    rows.forEach((row, index) => {
         const cells = row.cells;
         if (cells.length > 0) {
             // 查找正在运行的任务行（可以通过状态或其他标识符）
             const statusCell = cells[1]; // 状态列
             if (statusCell && statusCell.innerHTML.includes('运行中')) {
-                // 更新处理表数和传输记录数
-                if (cells[5]) cells[5].textContent = progress.tables_processed || 0;
-                if (cells[6]) cells[6].textContent = Utils.formatNumber(progress.records_transferred || 0);
+                console.log('找到运行中的任务行，行索引:', index);
                 
-                // 更新持续时间
-                if (cells[4] && progress.start_time) {
-                    const duration = (Date.now() - new Date(progress.start_time).getTime()) / 1000;
+                // 更新处理表数和传输记录数
+                if (cells[5]) {
+                    const tablesCompleted = progress.tables_completed || 0;
+                    cells[5].textContent = tablesCompleted;
+                    console.log('更新处理表数:', tablesCompleted);
+                }
+                
+                if (cells[6]) {
+                    const recordsProcessed = progress.records_processed || 0;
+                    cells[6].textContent = Utils.formatNumber(recordsProcessed);
+                    console.log('更新传输记录数:', recordsProcessed);
+                }
+                
+                // 更新持续时间（基于日志开始时间）
+                if (cells[4] && runningLog.start_time) {
+                    const duration = (Date.now() - new Date(runningLog.start_time).getTime()) / 1000;
                     cells[4].textContent = Utils.formatDuration(duration);
                 }
                 
                 // 如果有当前操作信息，可以在状态中显示
-                if (progress.current_operation) {
+                if (progress.current_table) {
                     const statusBadge = statusCell.querySelector('.badge');
                     if (statusBadge) {
-                        statusBadge.title = progress.current_operation;
+                        statusBadge.title = `正在处理: ${progress.current_table}`;
+                    }
+                }
+                
+                // 显示详细的进度信息
+                if (progress.percentage !== undefined || progress.current_table_percentage !== undefined) {
+                    const statusBadge = statusCell.querySelector('.badge');
+                    if (statusBadge) {
+                        let progressText = '运行中';
+                        
+                        // 如果有当前表的详细进度信息
+                        if (progress.current_table_percentage !== undefined && progress.current_table_total_records > 0) {
+                            const currentProcessed = progress.current_table_processed_records || 0;
+                            const currentTotal = progress.current_table_total_records || 0;
+                            progressText += ` (${progress.current_table_percentage}% - ${Utils.formatNumber(currentProcessed)}/${Utils.formatNumber(currentTotal)})`;
+                        } else if (progress.percentage !== undefined) {
+                            // 显示总体进度
+                            progressText += ` (${progress.percentage}%)`;
+                        }
+                        
+                        statusBadge.textContent = progressText;
+                        
+                        // 设置详细的tooltip信息
+                        let tooltipText = '';
+                        if (progress.current_table) {
+                            tooltipText += `正在处理: ${progress.current_table}\n`;
+                        }
+                        if (progress.current_table_total_records > 0) {
+                            tooltipText += `当前表记录数: ${Utils.formatNumber(progress.current_table_total_records)}\n`;
+                            tooltipText += `已处理记录数: ${Utils.formatNumber(progress.current_table_processed_records || 0)}\n`;
+                        }
+                        if (progress.total_tables) {
+                            tooltipText += `总表数: ${progress.total_tables}\n`;
+                            tooltipText += `已完成表数: ${progress.tables_completed || 0}`;
+                        }
+                        
+                        if (tooltipText) {
+                            statusBadge.title = tooltipText;
+                        }
                     }
                 }
             }
@@ -133,6 +197,11 @@ async function loadLogs(page = 1) {
                     <button class="btn btn-outline-info" onclick="viewLogDetail(${log.id})" title="查看详情">
                         <i class="fas fa-eye"></i>
                     </button>
+                    ${log.status === 'running' ? `
+                        <button class="btn btn-outline-warning" onclick="stopRunningLog(${log.id}, ${log.job_id})" title="停止任务">
+                            <i class="fas fa-stop"></i>
+                        </button>
+                    ` : ''}
                     ${log.status !== 'running' ? `
                         <button class="btn btn-outline-danger" onclick="deleteLog(${log.id})" title="删除">
                             <i class="fas fa-trash"></i>
@@ -160,6 +229,8 @@ async function loadLogs(page = 1) {
         });
         
         updatePagination();
+        
+        // SSE连接已在上面建立，无需额外刷新机制
         
     } catch (error) {
         console.error('加载日志列表失败:', error);
@@ -446,14 +517,27 @@ function updatePagination() {
     pagination.innerHTML = paginationHtml;
 }
 
-// 自动刷新（每30秒）
-setInterval(() => {
-    if (document.visibilityState === 'visible') {
-        loadSummary();
-        // 如果当前页有运行中的任务，刷新列表
-        const hasRunning = logs.some(log => log.status === 'running');
-        if (hasRunning) {
-            loadLogs(currentPage);
-        }
+// 定时刷新功能已移除，仅使用SSE获取实时进度
+
+// 停止运行中的任务
+async function stopRunningLog(logId, jobId) {
+    const log = logs.find(l => l.id === logId);
+    if (!log) return;
+    
+    if (!await Utils.confirm(`确定要停止任务"${log.job_name}"的执行吗？`)) {
+        return;
     }
-}, 30000);
+    
+    try {
+        // 停止任务
+        await ApiClient.post(`/logs/${logId}/stop`);
+        // 重置运行状态
+        await ApiClient.post(`/logs/job/${jobId}/reset-running-status`);
+        Utils.showSuccess('任务已停止并重置运行状态');
+        loadLogs(currentPage);
+        loadSummary(); // 刷新统计
+    } catch (error) {
+        console.error('停止任务失败:', error);
+        Utils.showError('停止任务失败: ' + (error.response?.data?.detail || error.message));
+    }
+}

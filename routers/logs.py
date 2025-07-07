@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 from database import get_db
 from models.job_execution_logs import JobExecutionLog, ExecutionStatus
 from models.backup_jobs import BackupJob
+from progress_manager import progress_manager
 
 router = APIRouter()
 
@@ -38,6 +39,8 @@ class LogSummaryResponse(BaseModel):
     failed_executions: int
     running_executions: int
     success_rate: float
+
+
 
 @router.get("/", response_model=List[JobExecutionLogResponse])
 async def list_logs(
@@ -80,6 +83,50 @@ async def list_logs(
         ))
     
     return result
+
+@router.post("/{log_id}/stop")
+async def stop_running_log(log_id: int, db: Session = Depends(get_db)):
+    """停止运行中的任务"""
+    log = db.query(JobExecutionLog).filter(JobExecutionLog.id == log_id).first()
+    
+    if not log:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execution log not found"
+        )
+    
+    if log.status != ExecutionStatus.RUNNING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task is not running"
+        )
+    
+    try:
+        # 更新日志状态为已取消
+        log.status = ExecutionStatus.CANCELLED
+        log.end_time = datetime.now(timezone.utc)
+        if log.start_time:
+            log.duration_seconds = int((log.end_time - log.start_time).total_seconds())
+        log.error_message = "Task manually stopped by user"
+        
+        # 通知进度管理器任务已停止
+        progress_manager.update_progress(log.job_id, {
+            "status": "cancelled",
+            "message": "Task stopped by user"
+        })
+        
+        db.commit()
+        
+        return {"message": "Task stopped successfully"}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to stop task: {str(e)}"
+        )
+
+
 
 @router.get("/{log_id}", response_model=JobExecutionLogResponse)
 async def get_log(log_id: int, db: Session = Depends(get_db)):
@@ -288,6 +335,33 @@ async def clear_job_logs(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to clear job logs: {str(e)}"
+        )
+
+@router.post("/job/{job_id}/reset-running-status")
+async def reset_job_running_status(job_id: int, db: Session = Depends(get_db)):
+    """重置任务的运行状态"""
+    from models.backup_jobs import BackupJob
+    
+    job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+    
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Backup job not found"
+        )
+    
+    try:
+        # 重置运行状态
+        job.is_running = False
+        db.commit()
+        
+        return {"message": "Job running status reset successfully"}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset job running status: {str(e)}"
         )
 
 @router.get("/recent/{limit}")

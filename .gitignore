@@ -2,7 +2,7 @@
 .env
 .env.local
 .env.*.local
-
+.venv
 # Python
 __pycache__/
 *.py[cod]
@@ -10,6 +10,7 @@ __pycache__/
 *.so
 *.pyc
 .Python
+.pyc
 build/
 develop-eggs/
 dist/

@@ -175,8 +175,12 @@
 document.addEventListener('DOMContentLoaded', function() {
     loadDashboardData();
     
-    // 设置定时刷新
-    setInterval(loadDashboardData, 30000); // 30秒刷新一次
+    // 监听页面可见性变化，当页面重新可见时刷新数据
+    document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') {
+            loadDashboardData();
+        }
+    });
 });
 
 // 加载仪表板数据

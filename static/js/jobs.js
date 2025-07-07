@@ -6,11 +6,14 @@ let editingJobId = null;
 let sourceTables = [];
 let editingTargetTables = [];
 
+
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', function() {
     loadJobs();
     loadConnections();
 });
+
+
 
 // 加载任务列表
 async function loadJobs() {
@@ -39,11 +42,13 @@ async function loadJobs() {
                     <button class="btn btn-outline-success" onclick="executeJob(${job.id})" title="立即执行">
                         <i class="fas fa-play"></i>
                     </button>
-                    <button class="btn btn-outline-warning" onclick="pauseResumeJob(${job.id}, '${job.status}')" title="${job.status === 'active' ? '暂停' : '恢复'}">
-                        <i class="fas fa-${job.status === 'active' ? 'pause' : 'play'}"></i>
-                    </button>
-                    <button class="btn btn-outline-primary" onclick="editJob(${job.id})" title="编辑">
+                    <button class="btn btn-outline-warning" onclick="editJob(${job.id})" title="编辑">
                         <i class="fas fa-edit"></i>
+                    </button>
+                    <button class="btn btn-outline-${job.status === 'active' ? 'secondary' : 'primary'}" 
+                            onclick="pauseResumeJob(${job.id}, '${job.status}')" 
+                            title="${job.status === 'active' ? '暂停' : '恢复'}">
+                        <i class="fas fa-${job.status === 'active' ? 'pause' : 'play'}"></i>
                     </button>
                     <button class="btn btn-outline-danger" onclick="deleteJob(${job.id})" title="删除">
                         <i class="fas fa-trash"></i>
@@ -61,7 +66,11 @@ async function loadJobs() {
                 nextRun,
                 actions
             ];
-            table.addRow(row);
+            const rowElement = table.addRow(row);
+            // 为行添加job-id属性，用于进度更新
+            if (rowElement) {
+                rowElement.setAttribute('data-job-id', job.id);
+            }
         });
         
     } catch (error) {
@@ -236,8 +245,10 @@ async function executeJob(jobId) {
     
     try {
         await ApiClient.post(`/jobs/${jobId}/run`);
-        Utils.showSuccess('任务已提交执行');
-        loadJobs(); // 刷新列表
+        Utils.showSuccess('任务已提交执行，请到执行日志页面查看进度');
+        
+        // 刷新任务列表
+        loadJobs();
     } catch (error) {
         console.error('执行任务失败:', error);
         Utils.showError('执行任务失败: ' + (error.response?.data?.detail || error.message));

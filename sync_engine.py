@@ -39,6 +39,7 @@ class SyncEngine:
         self.log_entry: JobExecutionLog = None
         self.db_session: Session = None
         self.progress_callback = progress_callback
+        self.is_cancelled = False  # 添加取消标志
         self.current_progress = {
             'stage': 'initializing',
             'current_table': '',
@@ -48,6 +49,29 @@ class SyncEngine:
             'total_records': 0,
             'percentage': 0
         }
+    
+    def _check_if_cancelled(self) -> bool:
+        """
+        检查任务是否被取消
+        
+        Returns:
+            bool: 如果任务被取消返回True
+        """
+        if self.is_cancelled:
+            return True
+            
+        # 检查数据库中的日志状态
+        if self.log_entry:
+            try:
+                # 刷新日志条目状态
+                self.db_session.refresh(self.log_entry)
+                if self.log_entry.status == ExecutionStatus.CANCELLED:
+                    self.is_cancelled = True
+                    return True
+            except Exception as e:
+                logger.warning(f"检查取消状态时出错: {e}")
+                
+        return False
         
     def execute(self) -> bool:
         """
@@ -79,8 +103,16 @@ class SyncEngine:
             success = True
             
         except Exception as e:
-            logger.error(f"Sync job {self.job.id} failed: {e}")
-            self._mark_failure(str(e), traceback.format_exc())
+            # 检查是否是用户取消的任务
+            if "Task cancelled by user" in str(e) or self.is_cancelled:
+                # 标记为取消状态
+                self._mark_cancelled("任务已被用户取消")
+                logger.info(f"Sync cancelled by user for job {self.job_id}")
+                success = False
+            else:
+                logger.error(f"Sync job {self.job.id} failed: {e}")
+                self._mark_failure(str(e), traceback.format_exc())
+                success = False
             
         finally:
             self._cleanup()
@@ -89,15 +121,33 @@ class SyncEngine:
     
     def _create_log_entry(self):
         """创建执行日志记录"""
-        self.log_entry = JobExecutionLog(
-            job_id=self.job.id,
-            status=ExecutionStatus.RUNNING,
-            log_details="任务开始执行..."
-        )
-        self.db_session.add(self.log_entry)
-        self.db_session.flush()  # 使用flush而不commit，让数据库设置start_time
-        self.db_session.refresh(self.log_entry)  # 刷新获取数据库设置的时间
-        logger.info(f"Created log entry for job {self.job.id}")
+        try:
+            self.log_entry = JobExecutionLog(
+                job_id=self.job.id,
+                status=ExecutionStatus.RUNNING,
+                log_details="任务开始执行..."
+            )
+            self.db_session.add(self.log_entry)
+            self.db_session.flush()  # 使用flush而不commit，让数据库设置start_time
+            self.db_session.refresh(self.log_entry)  # 刷新获取数据库设置的时间
+            logger.info(f"Created log entry for job {self.job.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create log entry: {e}")
+            # 如果flush失败，回滚并重试
+            try:
+                self.db_session.rollback()
+                self.log_entry = JobExecutionLog(
+                    job_id=self.job.id,
+                    status=ExecutionStatus.RUNNING,
+                    log_details="任务开始执行..."
+                )
+                self.db_session.add(self.log_entry)
+                self.db_session.commit()  # 直接提交而不是flush
+                logger.info(f"Created log entry for job {self.job.id} after retry")
+            except Exception as retry_error:
+                logger.error(f"Failed to create log entry after retry: {retry_error}")
+                raise Exception(f"Unable to create execution log: {retry_error}")
     
     def _establish_connections(self):
         """建立源和目标数据库连接"""
@@ -161,6 +211,11 @@ class SyncEngine:
             self._update_log(f"开始同步 {len(target_tables)} 个表...")
             
             for i, target_table in enumerate(target_tables):
+                # 检查任务是否被取消
+                if self._check_if_cancelled():
+                    self._update_log("任务已被用户取消")
+                    raise ValueError("Task cancelled by user")
+                    
                 schema_name = target_table.schema_name
                 table_name = target_table.table_name
                 
@@ -696,7 +751,17 @@ class SyncEngine:
             # 根据表的增量同步策略构建查询SQL
             query = self._build_sync_query(target_table)
             
-            self._update_log(f"开始同步表 {full_table_name}，查询: {query}")
+            # 获取总记录数用于准确的进度计算
+            total_count = self._get_table_record_count(target_table, query)
+            
+            self._update_log(f"开始同步表 {full_table_name}，预计记录数: {total_count}，查询: {query}")
+            
+            # 更新进度信息，包含总记录数
+            self.current_progress.update({
+                'current_table_total_records': total_count,
+                'current_table_processed_records': 0
+            })
+            self._notify_progress()
             
             # 如果是全量同步或表的增量策略为NONE，先清空目标表
             if (self.job.sync_mode == SyncMode.FULL or 
@@ -724,17 +789,34 @@ class SyncEngine:
                 all_data = []  # 保存所有数据用于更新last_sync_value
                 
                 for row in result:
+                    # 检查任务是否被取消
+                    if self._check_if_cancelled():
+                        self._update_log(f"表 {full_table_name} 数据同步被用户取消")
+                        raise ValueError("Task cancelled by user")
+                        
                     record = dict(zip(columns, row))
                     batch_data.append(record)
                     all_data.append(record)
                     
                     if len(batch_data) >= batch_size:
+                        # 检查任务是否被取消（在批量插入前再次检查）
+                        if self._check_if_cancelled():
+                            self._update_log(f"表 {full_table_name} 批量插入被用户取消")
+                            raise ValueError("Task cancelled by user")
+                            
                         # 批量插入数据
                         self._batch_insert(schema_name, table_name, columns, batch_data)
                         total_records += len(batch_data)
                         
                         # 更新记录处理进度
                         self.current_progress['records_processed'] = self.current_progress.get('records_processed', 0) + len(batch_data)
+                        self.current_progress['current_table_processed_records'] = self.current_progress.get('current_table_processed_records', 0) + len(batch_data)
+                        
+                        # 计算当前表的进度百分比
+                        if self.current_progress.get('current_table_total_records', 0) > 0:
+                            table_percentage = int((self.current_progress['current_table_processed_records'] / self.current_progress['current_table_total_records']) * 100)
+                            self.current_progress['current_table_percentage'] = min(table_percentage, 100)
+                        
                         self._notify_progress()
                         
                         batch_data = []
@@ -746,6 +828,13 @@ class SyncEngine:
                     
                     # 更新最终记录处理进度
                     self.current_progress['records_processed'] = self.current_progress.get('records_processed', 0) + len(batch_data)
+                    self.current_progress['current_table_processed_records'] = self.current_progress.get('current_table_processed_records', 0) + len(batch_data)
+                    
+                    # 计算当前表的进度百分比
+                    if self.current_progress.get('current_table_total_records', 0) > 0:
+                        table_percentage = int((self.current_progress['current_table_processed_records'] / self.current_progress['current_table_total_records']) * 100)
+                        self.current_progress['current_table_percentage'] = min(table_percentage, 100)
+                    
                     self._notify_progress()
                 
                 # 更新增量同步值（如果是增量模式且有增量字段）
@@ -758,6 +847,34 @@ class SyncEngine:
                 
         except Exception as e:
             raise Exception(f"Failed to sync data for {schema_name}.{table_name}: {e}")
+    
+    def _get_table_record_count(self, target_table, query: str) -> int:
+        """
+        获取表的总记录数用于进度计算
+        
+        Args:
+            target_table: JobTargetTable对象
+            query: 同步查询SQL
+            
+        Returns:
+            int: 记录总数
+        """
+        try:
+            # 将原查询包装为COUNT查询
+            count_query = f"SELECT COUNT(*) FROM ({query}) AS count_subquery"
+            
+            with self.source_engine.connect() as source_conn:
+                result = source_conn.execute(text(count_query))
+                row = result.fetchone()
+                total_count = row[0] if row else 0
+                
+                logger.info(f"Table {target_table.schema_name}.{target_table.table_name} total records: {total_count}")
+                return total_count
+                
+        except Exception as e:
+            logger.warning(f"Failed to get record count for {target_table.schema_name}.{target_table.table_name}: {e}")
+            # 如果无法获取总数，返回0，这样就不会显示百分比
+            return 0
     
     def _preprocess_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """预处理数据，将字典和列表字段序列化为JSON字符串或PostgreSQL数组格式"""
@@ -1351,6 +1468,22 @@ class SyncEngine:
     def _update_log(self, message: str):
         """更新日志详情"""
         try:
+            # 检查会话状态，如果已回滚则重新开始事务
+            if self.db_session.is_active and self.db_session.in_transaction():
+                # 会话处于事务中但可能已回滚，尝试刷新对象
+                try:
+                    self.db_session.refresh(self.log_entry)
+                except Exception:
+                    # 如果刷新失败，说明会话已回滚，需要重新开始
+                    self.db_session.rollback()
+                    # 重新获取日志对象
+                    self.log_entry = self.db_session.query(JobExecutionLog).filter(
+                        JobExecutionLog.id == self.log_entry.id
+                    ).first()
+                    if not self.log_entry:
+                        logger.error("Log entry not found after rollback")
+                        return
+            
             current_log = self.log_entry.log_details or ""
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_log = f"{current_log}\n[{timestamp}] {message}"
@@ -1360,20 +1493,42 @@ class SyncEngine:
             
         except Exception as e:
             logger.error(f"Failed to update log: {e}")
+            # 确保会话处于可用状态
+            try:
+                self.db_session.rollback()
+            except:
+                pass
     
     def _mark_success(self):
         """标记任务执行成功"""
         try:
+            # 检查会话状态，如果已回滚则重新开始事务
+            if self.db_session.is_active and self.db_session.in_transaction():
+                try:
+                    self.db_session.refresh(self.log_entry)
+                except Exception:
+                    # 如果刷新失败，说明会话已回滚，需要重新开始
+                    self.db_session.rollback()
+                    # 重新获取日志对象
+                    self.log_entry = self.db_session.query(JobExecutionLog).filter(
+                        JobExecutionLog.id == self.log_entry.id
+                    ).first()
+                    if not self.log_entry:
+                        logger.error("Log entry not found after rollback")
+                        return
+            
             # 设置结束时间和状态
             self.log_entry.status = ExecutionStatus.SUCCESS
             self.log_entry.end_time = func.now()  # 使用数据库时间
             
-            self._update_log("任务执行成功完成")
-            
             # 更新任务的最后运行时间
             self.job.last_run_at = func.now()  # 使用数据库时间
             
+            # 先提交状态更新
             self.db_session.commit()
+            
+            # 然后更新日志
+            self._update_log("任务执行成功完成")
             
             # 刷新日志对象获取数据库计算的时间
             self.db_session.refresh(self.log_entry)
@@ -1388,19 +1543,41 @@ class SyncEngine:
             
         except Exception as e:
             logger.error(f"Failed to mark job as successful: {e}")
+            # 确保会话处于可用状态
+            try:
+                self.db_session.rollback()
+            except:
+                pass
     
     def _mark_failure(self, error_message: str, error_traceback: str):
         """标记任务执行失败"""
         try:
+            # 检查会话状态，如果已回滚则重新开始事务
+            if self.db_session.is_active and self.db_session.in_transaction():
+                try:
+                    self.db_session.refresh(self.log_entry)
+                except Exception:
+                    # 如果刷新失败，说明会话已回滚，需要重新开始
+                    self.db_session.rollback()
+                    # 重新获取日志对象
+                    self.log_entry = self.db_session.query(JobExecutionLog).filter(
+                        JobExecutionLog.id == self.log_entry.id
+                    ).first()
+                    if not self.log_entry:
+                        logger.error("Log entry not found after rollback")
+                        return
+            
             # 设置状态和错误信息
             self.log_entry.status = ExecutionStatus.FAILED
             self.log_entry.end_time = func.now()  # 使用数据库时间
             self.log_entry.error_message = error_message
             self.log_entry.error_traceback = error_traceback
             
-            self._update_log(f"任务执行失败: {error_message}")
-            
+            # 先提交状态更新
             self.db_session.commit()
+            
+            # 然后更新日志
+            self._update_log(f"任务执行失败: {error_message}")
             
             # 刷新日志对象获取数据库计算的时间
             self.db_session.refresh(self.log_entry)
@@ -1415,11 +1592,77 @@ class SyncEngine:
             
         except Exception as e:
             logger.error(f"Failed to mark job as failed: {e}")
+            # 确保会话处于可用状态
+            try:
+                self.db_session.rollback()
+            except:
+                pass
+    
+    def _mark_cancelled(self, message: str = "任务已被用户取消"):
+        """
+        标记任务为取消状态
+        
+        Args:
+            message: 取消消息
+        """
+        try:
+            # 检查会话状态，如果已回滚则重新开始事务
+            if self.db_session.is_active and self.db_session.in_transaction():
+                try:
+                    self.db_session.refresh(self.log_entry)
+                except Exception:
+                    # 如果刷新失败，说明会话已回滚，需要重新开始
+                    self.db_session.rollback()
+                    # 重新获取日志对象
+                    self.log_entry = self.db_session.query(JobExecutionLog).filter(
+                        JobExecutionLog.id == self.log_entry.id
+                    ).first()
+                    if not self.log_entry:
+                        logger.error("Log entry not found after rollback")
+                        return
+            
+            # 设置状态和取消信息
+            self.log_entry.status = ExecutionStatus.CANCELLED
+            self.log_entry.end_time = func.now()  # 使用数据库时间
+            self.log_entry.error_message = message
+            
+            # 先提交状态更新
+            self.db_session.commit()
+            
+            # 然后更新日志
+            self._update_log(f"任务已取消: {message}")
+            
+            # 刷新日志对象获取数据库计算的时间
+            self.db_session.refresh(self.log_entry)
+            
+            # 计算执行时间（秒）
+            if self.log_entry.start_time and self.log_entry.end_time:
+                duration = (self.log_entry.end_time - self.log_entry.start_time).total_seconds()
+                self.log_entry.duration_seconds = int(duration)
+                self.db_session.commit()
+            
+            # 更新进度信息
+            self.current_progress.update({
+                'stage': 'cancelled',
+                'message': message
+            })
+            self._notify_progress()
+            
+            logger.info(f"Job {self.job.id} marked as cancelled")
+            
+        except Exception as e:
+            logger.error(f"Failed to mark job as cancelled: {e}")
+            # 确保会话处于可用状态
+            try:
+                self.db_session.rollback()
+            except:
+                pass
     
     def _notify_progress(self):
         """通知进度更新"""
         if self.progress_callback:
             try:
+                
                 self.progress_callback(self.job_id, self.current_progress.copy())
             except Exception as e:
                 logger.warning(f"Progress callback failed: {e}")
