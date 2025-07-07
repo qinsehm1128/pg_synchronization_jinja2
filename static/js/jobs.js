@@ -4,6 +4,7 @@ let jobs = [];
 let connections = [];
 let editingJobId = null;
 let sourceTables = [];
+let editingTargetTables = [];
 
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', function() {
@@ -527,61 +528,11 @@ async function loadSourceTablesForEdit(job) {
             return;
         }
         
-        const syncMode = job.sync_mode;
-        const isIncremental = syncMode === 'incremental';
-        const targetTables = job.target_tables || [];
+        // 保存编辑时的目标表配置
+        editingTargetTables = job.target_tables || [];
         
-        const tablesHtml = sourceTables.map((table, index) => {
-            // 查找对应的目标表配置
-            const targetTable = targetTables.find(t => 
-                t.schema_name === (table.full_name.split('.')[0] || 'public') && 
-                t.table_name === (table.full_name.split('.')[1] || table.full_name)
-            );
-            
-            const isChecked = targetTable ? 'checked' : '';
-            const incrementalStrategy = targetTable?.incremental_strategy || 'NONE';
-            const incrementalField = targetTable?.incremental_field || '';
-            const customCondition = targetTable?.custom_condition || '';
-            
-            const incrementalConfig = isIncremental ? `
-                <div class="mt-2 ms-4" id="incremental_config_${index}" style="display: ${isChecked ? 'block' : 'none'};">
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <label class="form-label text-muted small">增量策略:</label>
-                            <select class="form-select form-select-sm" id="strategy_${index}" onchange="toggleIncrementalFields(${index})">
-                                <option value="none" ${incrementalStrategy === 'none' ? 'selected' : ''}>无增量</option>
-                                <option value="auto_id" ${incrementalStrategy === 'auto_id' ? 'selected' : ''}>自动ID</option>
-                                <option value="auto_timestamp" ${incrementalStrategy === 'auto_timestamp' ? 'selected' : ''}>自动时间戳</option>
-                                <option value="custom_condition" ${incrementalStrategy === 'custom_condition' ? 'selected' : ''}>自定义条件</option>
-                            </select>
-                        </div>
-                        <div class="col-md-4" id="field_container_${index}" style="display: ${(incrementalStrategy === 'auto_id' || incrementalStrategy === 'auto_timestamp') ? 'block' : 'none'};">
-                            <label class="form-label text-muted small">增量字段:</label>
-                            <input type="text" class="form-control form-control-sm" id="field_${index}" placeholder="字段名" value="${incrementalField}">
-                        </div>
-                        <div class="col-md-4" id="condition_container_${index}" style="display: ${incrementalStrategy === 'custom_condition' ? 'block' : 'none'};">
-                            <label class="form-label text-muted small">自定义条件:</label>
-                            <input type="text" class="form-control form-control-sm" id="condition_${index}" placeholder="WHERE条件" value="${customCondition}">
-                        </div>
-                    </div>
-                </div>
-            ` : '';
-            
-            return `
-                <div class="border rounded p-2 mb-2">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" value="${table.full_name}" id="table_${index}" ${isChecked} onchange="toggleTableConfig(${index})">
-                        <label class="form-check-label" for="table_${index}">
-                            <strong>${table.full_name}</strong>
-                            <small class="text-muted d-block">Owner: ${table.table_owner}</small>
-                        </label>
-                    </div>
-                    ${incrementalConfig}
-                </div>
-            `;
-        }).join('');
-        
-        container.innerHTML = tablesHtml;
+        // 使用带筛选功能的渲染方法
+        renderTablesWithFilterForEdit(job.sync_mode);
         
     } catch (error) {
         console.error('加载源数据库表失败:', error);
@@ -695,7 +646,11 @@ function renderTablesWithFilter(filterText = '') {
 function filterTables() {
     const filterInput = document.getElementById('tableFilterInput');
     const filterText = filterInput ? filterInput.value : '';
-    renderTablesWithFilter(filterText);
+    if (editingJobId) {
+        renderTablesWithFilterForEdit(document.getElementById('syncMode').value, filterText);
+    } else {
+        renderTablesWithFilter(filterText);
+    }
 }
 
 // 清除筛选
@@ -703,8 +658,96 @@ function clearTableFilter() {
     const filterInput = document.getElementById('tableFilterInput');
     if (filterInput) {
         filterInput.value = '';
-        renderTablesWithFilter('');
+        if (editingJobId) {
+            renderTablesWithFilterForEdit(document.getElementById('syncMode').value, '');
+        } else {
+            renderTablesWithFilter('');
+        }
     }
+}
+
+// 渲染表格列表（编辑模式，带筛选功能）
+function renderTablesWithFilterForEdit(syncMode, filterText = '') {
+    const container = document.getElementById('tablesContainer');
+    const filterContainer = document.getElementById('tableFilterContainer');
+    const filterInput = document.getElementById('tableFilterInput');
+    const isIncremental = syncMode === 'incremental';
+    
+    // 显示筛选容器
+    if (filterContainer) {
+        filterContainer.style.display = 'block';
+        if (filterInput) {
+            filterInput.value = filterText;
+        }
+    }
+    
+    // 筛选表格
+    const filteredTables = sourceTables.filter(table => 
+        table.full_name.toLowerCase().includes(filterText.toLowerCase()) ||
+        table.table_owner.toLowerCase().includes(filterText.toLowerCase())
+    );
+    
+    // 更新统计信息
+    const statsHtml = `<small class="text-muted d-block mb-2">找到 ${filteredTables.length} 个表（共 ${sourceTables.length} 个）</small>`;
+    
+    if (filteredTables.length === 0) {
+        container.innerHTML = statsHtml + '<p class="text-muted text-center">没有找到匹配的表</p>';
+        return;
+    }
+    
+    const tablesHtml = filteredTables.map((table, index) => {
+        const originalIndex = sourceTables.findIndex(t => t.full_name === table.full_name);
+        
+        // 查找对应的目标表配置
+        const targetTable = editingTargetTables.find(t => 
+            t.schema_name === (table.full_name.split('.')[0] || 'public') && 
+            t.table_name === (table.full_name.split('.')[1] || table.full_name)
+        );
+        
+        const isChecked = targetTable ? 'checked' : '';
+        const incrementalStrategy = targetTable?.incremental_strategy || 'none';
+        const incrementalField = targetTable?.incremental_field || '';
+        const customCondition = targetTable?.custom_condition || '';
+        
+        const incrementalConfig = isIncremental ? `
+            <div class="mt-2 ms-4" id="incremental_config_${originalIndex}" style="display: ${isChecked ? 'block' : 'none'};">
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <label class="form-label text-muted small">增量策略:</label>
+                        <select class="form-select form-select-sm" id="strategy_${originalIndex}" onchange="toggleIncrementalFields(${originalIndex})">
+                            <option value="none" ${incrementalStrategy === 'none' ? 'selected' : ''}>无增量</option>
+                            <option value="auto_id" ${incrementalStrategy === 'auto_id' ? 'selected' : ''}>自动ID</option>
+                            <option value="auto_timestamp" ${incrementalStrategy === 'auto_timestamp' ? 'selected' : ''}>自动时间戳</option>
+                            <option value="custom_condition" ${incrementalStrategy === 'custom_condition' ? 'selected' : ''}>自定义条件</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4" id="field_container_${originalIndex}" style="display: ${(incrementalStrategy === 'auto_id' || incrementalStrategy === 'auto_timestamp') ? 'block' : 'none'};">
+                        <label class="form-label text-muted small">增量字段:</label>
+                        <input type="text" class="form-control form-control-sm" id="field_${originalIndex}" placeholder="字段名" value="${incrementalField}">
+                    </div>
+                    <div class="col-md-4" id="condition_container_${originalIndex}" style="display: ${incrementalStrategy === 'custom_condition' ? 'block' : 'none'};">
+                        <label class="form-label text-muted small">自定义条件:</label>
+                        <input type="text" class="form-control form-control-sm" id="condition_${originalIndex}" placeholder="WHERE条件" value="${customCondition}">
+                    </div>
+                </div>
+            </div>
+        ` : '';
+        
+        return `
+            <div class="border rounded p-2 mb-2 table-item" data-table-name="${table.full_name}">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="${table.full_name}" id="table_${originalIndex}" ${isChecked} onchange="toggleTableConfig(${originalIndex})">
+                    <label class="form-check-label" for="table_${originalIndex}">
+                        <strong>${table.full_name}</strong>
+                        <small class="text-muted d-block">Owner: ${table.table_owner}</small>
+                    </label>
+                </div>
+                ${incrementalConfig}
+            </div>
+        `;
+    }).join('');
+    
+    container.innerHTML = statsHtml + tablesHtml;
 }
 
 // 获取选中的表格
