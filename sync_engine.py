@@ -5,8 +5,9 @@
 import json
 import logging
 import traceback
+import asyncio
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy import create_engine, text, MetaData, Table
 from sqlalchemy.orm import Session
 from sqlalchemy.engine import Engine
@@ -23,12 +24,13 @@ logger = logging.getLogger(__name__)
 class SyncEngine:
     """数据库同步引擎"""
     
-    def __init__(self, job_id: int):
+    def __init__(self, job_id: int, progress_callback: Optional[callable] = None):
         """
         初始化同步引擎
         
         Args:
             job_id: 备份任务ID
+            progress_callback: 进度回调函数
         """
         self.job_id = job_id
         self.job: BackupJob = None
@@ -36,6 +38,16 @@ class SyncEngine:
         self.destination_engine: Engine = None
         self.log_entry: JobExecutionLog = None
         self.db_session: Session = None
+        self.progress_callback = progress_callback
+        self.current_progress = {
+            'stage': 'initializing',
+            'current_table': '',
+            'tables_completed': 0,
+            'total_tables': 0,
+            'records_processed': 0,
+            'total_records': 0,
+            'percentage': 0
+        }
         
     def execute(self) -> bool:
         """
@@ -133,19 +145,32 @@ class SyncEngine:
         
         try:
             # 获取要同步的表列表
-            target_tables = self.job.target_tables
+            target_tables = [t for t in self.job.target_tables if t.is_active]
             
             if not target_tables:
                 raise ValueError("No target tables specified for sync")
             
+            # 更新进度信息
+            self.current_progress.update({
+                'stage': 'syncing',
+                'total_tables': len(target_tables),
+                'tables_completed': 0
+            })
+            self._notify_progress()
+            
             self._update_log(f"开始同步 {len(target_tables)} 个表...")
             
-            for target_table in target_tables:
-                if not target_table.is_active:
-                    continue
-                
+            for i, target_table in enumerate(target_tables):
                 schema_name = target_table.schema_name
                 table_name = target_table.table_name
+                
+                # 更新当前表进度
+                self.current_progress.update({
+                    'current_table': f"{schema_name}.{table_name}",
+                    'tables_completed': i,
+                    'percentage': int((i / len(target_tables)) * 100)
+                })
+                self._notify_progress()
                 
                 self._update_log(f"正在同步表: {schema_name}.{table_name} （增量策略: {target_table.incremental_strategy.value if target_table.incremental_strategy else 'none'}）")
                 
@@ -158,6 +183,14 @@ class SyncEngine:
                 tables_processed += 1
                 total_records += records_count
                 
+                # 更新完成的表数量
+                self.current_progress.update({
+                    'tables_completed': tables_processed,
+                    'records_processed': total_records,
+                    'percentage': int((tables_processed / len(target_tables)) * 100)
+                })
+                self._notify_progress()
+                
                 self._update_log(f"表 {schema_name}.{table_name} 同步完成，传输 {records_count} 条记录")
             
             # 更新统计信息
@@ -165,9 +198,21 @@ class SyncEngine:
             self.log_entry.records_transferred = total_records
             self.db_session.commit()
             
+            # 最终进度更新
+            self.current_progress.update({
+                'stage': 'completed',
+                'percentage': 100
+            })
+            self._notify_progress()
+            
             logger.info(f"Sync completed for job {self.job.id}: {tables_processed} tables, {total_records} records")
             
         except Exception as e:
+            self.current_progress.update({
+                'stage': 'error',
+                'error': str(e)
+            })
+            self._notify_progress()
             raise Exception(f"Sync operation failed: {e}")
     
     def _sync_table_structure(self, schema_name: str, table_name: str):
@@ -263,12 +308,21 @@ class SyncEngine:
                         # 批量插入数据
                         self._batch_insert(schema_name, table_name, columns, batch_data)
                         total_records += len(batch_data)
+                        
+                        # 更新记录处理进度
+                        self.current_progress['records_processed'] = self.current_progress.get('records_processed', 0) + len(batch_data)
+                        self._notify_progress()
+                        
                         batch_data = []
                 
                 # 处理剩余数据
                 if batch_data:
                     self._batch_insert(schema_name, table_name, columns, batch_data)
                     total_records += len(batch_data)
+                    
+                    # 更新最终记录处理进度
+                    self.current_progress['records_processed'] = self.current_progress.get('records_processed', 0) + len(batch_data)
+                    self._notify_progress()
                 
                 # 更新增量同步值（如果是增量模式且有增量字段）
                 if (target_table.incremental_strategy in [IncrementalStrategy.AUTO_ID, IncrementalStrategy.AUTO_TIMESTAMP] 
@@ -925,6 +979,14 @@ class SyncEngine:
         except Exception as e:
             logger.error(f"Failed to mark job as failed: {e}")
     
+    def _notify_progress(self):
+        """通知进度更新"""
+        if self.progress_callback:
+            try:
+                self.progress_callback(self.job_id, self.current_progress.copy())
+            except Exception as e:
+                logger.warning(f"Progress callback failed: {e}")
+    
     def _cleanup(self):
         """清理资源"""
         try:
@@ -938,12 +1000,13 @@ class SyncEngine:
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
-def execute_sync_job(job_id: int) -> bool:
+def execute_sync_job(job_id: int, progress_callback: Optional[callable] = None) -> bool:
     """
     执行同步任务的入口函数
     
     Args:
         job_id: 任务ID
+        progress_callback: 进度回调函数
         
     Returns:
         bool: 执行是否成功
@@ -970,7 +1033,7 @@ def execute_sync_job(job_id: int) -> bool:
             db.close()
         
         # 执行同步
-        sync_engine = SyncEngine(job_id)
+        sync_engine = SyncEngine(job_id, progress_callback)
         success = sync_engine.execute()
         
         # 更新任务状态

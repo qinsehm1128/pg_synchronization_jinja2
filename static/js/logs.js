@@ -6,13 +6,91 @@ let currentFilter = 'all';
 let currentPage = 1;
 let pageSize = 20;
 let totalPages = 1;
+let progressConnections = new Map(); // 存储SSE连接
 
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', function() {
     loadLogs();
     loadJobs();
     loadSummary();
+    
+    // 页面卸载时关闭所有SSE连接
+    window.addEventListener('beforeunload', function() {
+        progressConnections.forEach(connection => {
+            connection.close();
+        });
+    });
 });
+
+// 连接SSE获取任务进度
+function connectToJobProgress(jobId) {
+    // 如果已经有连接，先关闭
+    if (progressConnections.has(jobId)) {
+        progressConnections.get(jobId).close();
+    }
+    
+    const eventSource = new EventSource(`/api/jobs/${jobId}/progress`);
+    progressConnections.set(jobId, eventSource);
+    
+    eventSource.onmessage = function(event) {
+        try {
+            const progress = JSON.parse(event.data);
+            updateProgressDisplay(jobId, progress);
+        } catch (error) {
+            console.error('解析进度数据失败:', error);
+        }
+    };
+    
+    eventSource.onerror = function(error) {
+        console.error('SSE连接错误:', error);
+        // 连接错误时移除连接
+        progressConnections.delete(jobId);
+        eventSource.close();
+    };
+    
+    eventSource.addEventListener('complete', function(event) {
+        // 任务完成时关闭连接并刷新日志
+        progressConnections.delete(jobId);
+        eventSource.close();
+        loadLogs(currentPage);
+        loadSummary();
+    });
+}
+
+// 更新进度显示
+function updateProgressDisplay(jobId, progress) {
+    // 在日志表格中找到对应的行并更新进度
+    const table = document.getElementById('logs-table');
+    if (!table) return;
+    
+    const rows = table.querySelectorAll('tbody tr');
+    rows.forEach(row => {
+        const cells = row.cells;
+        if (cells.length > 0) {
+            // 查找正在运行的任务行（可以通过状态或其他标识符）
+            const statusCell = cells[1]; // 状态列
+            if (statusCell && statusCell.innerHTML.includes('运行中')) {
+                // 更新处理表数和传输记录数
+                if (cells[5]) cells[5].textContent = progress.tables_processed || 0;
+                if (cells[6]) cells[6].textContent = Utils.formatNumber(progress.records_transferred || 0);
+                
+                // 更新持续时间
+                if (cells[4] && progress.start_time) {
+                    const duration = (Date.now() - new Date(progress.start_time).getTime()) / 1000;
+                    cells[4].textContent = Utils.formatDuration(duration);
+                }
+                
+                // 如果有当前操作信息，可以在状态中显示
+                if (progress.current_operation) {
+                    const statusBadge = statusCell.querySelector('.badge');
+                    if (statusBadge) {
+                        statusBadge.title = progress.current_operation;
+                    }
+                }
+            }
+        }
+    });
+}
 
 // 加载日志列表
 async function loadLogs(page = 1) {
@@ -74,6 +152,11 @@ async function loadLogs(page = 1) {
                 actions
             ];
             table.addRow(row);
+            
+            // 如果任务正在运行，连接SSE获取实时进度
+            if (log.status === 'running' && log.job_id) {
+                connectToJobProgress(log.job_id);
+            }
         });
         
         updatePagination();

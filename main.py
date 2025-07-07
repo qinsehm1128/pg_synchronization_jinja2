@@ -7,9 +7,12 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
+import asyncio
+import json
+from typing import AsyncGenerator
 
 from sqlalchemy import text
 
@@ -18,6 +21,7 @@ from database import init_db
 from scheduler import scheduler_manager
 from routers import connections, jobs, logs
 from database import engine
+from progress_manager import progress_manager
 # 配置日志
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper()),
@@ -90,6 +94,55 @@ async def jobs_page(request: Request):
 async def logs_page(request: Request):
     """执行日志页面"""
     return templates.TemplateResponse("logs.html", {"request": request})
+
+@app.get("/api/jobs/{job_id}/progress")
+async def get_job_progress(job_id: int, request: Request):
+    """SSE端点：实时推送任务执行进度"""
+    
+    async def event_stream() -> AsyncGenerator[str, None]:
+        queue = asyncio.Queue(maxsize=100)
+        
+        try:
+            # 添加客户端
+            progress_manager.add_client(job_id, queue)
+            
+            # 发送当前进度
+            current_progress = progress_manager.get_current_progress(job_id)
+            if current_progress:
+                yield f"data: {json.dumps(current_progress)}\n\n"
+            
+            # 持续监听进度更新
+            while True:
+                try:
+                    # 等待进度更新，设置超时避免长时间阻塞
+                    progress_data = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {json.dumps(progress_data)}\n\n"
+                    
+                    # 如果任务完成，发送完成事件并结束
+                    if progress_data.get('status') in ['completed', 'failed']:
+                        yield f"event: complete\ndata: {json.dumps(progress_data)}\n\n"
+                        break
+                        
+                except asyncio.TimeoutError:
+                    # 发送心跳保持连接
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': asyncio.get_event_loop().time()})}\n\n"
+                    
+        except Exception as e:
+            logger.error(f"SSE stream error for job {job_id}: {e}")
+        finally:
+            # 清理客户端
+            progress_manager.remove_client(job_id, queue)
+    
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
 
 @app.get("/api/health")
 async def health_check():

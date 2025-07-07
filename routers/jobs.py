@@ -10,6 +10,7 @@ from database import get_db
 from models.backup_jobs import BackupJob, JobTargetTable, JobStatus, SyncMode, ConflictStrategy, ExecutionMode, IncrementalStrategy
 from models.database_connections import DatabaseConnection
 from scheduler import scheduler_manager
+from progress_manager import progress_manager
 
 router = APIRouter()
 
@@ -282,7 +283,7 @@ async def create_job(
         if backup_job.execution_mode == ExecutionMode.IMMEDIATE:
             from sync_engine import execute_sync_job
             import threading
-            thread = threading.Thread(target=execute_sync_job, args=(backup_job.id,))
+            thread = threading.Thread(target=execute_sync_job, args=(backup_job.id, progress_manager.update_progress))
             thread.start()
         
         return BackupJobResponse(
@@ -402,7 +403,7 @@ async def update_job(
         if 'execution_mode' in update_data and update_data['execution_mode'] == ExecutionMode.IMMEDIATE:
             from sync_engine import execute_sync_job
             import threading
-            thread = threading.Thread(target=execute_sync_job, args=(job_id,))
+            thread = threading.Thread(target=execute_sync_job, args=(job_id, progress_manager.update_progress))
             thread.start()
         
         # 获取数据库连接名称
@@ -511,7 +512,7 @@ async def run_job_now(job_id: int, db: Session = Depends(get_db)):
         import threading
         
         # 在后台线程中执行，避免阻塞API响应
-        thread = threading.Thread(target=execute_sync_job, args=(job_id,))
+        thread = threading.Thread(target=execute_sync_job, args=(job_id, progress_manager.update_progress))
         thread.start()
         
         return {"message": "Job execution started"}

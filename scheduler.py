@@ -15,6 +15,7 @@ from models.backup_jobs import BackupJob, JobStatus, ExecutionMode
 from models.job_execution_logs import JobExecutionLog, ExecutionStatus
 from sync_engine import execute_sync_job
 from sqlalchemy import text
+from progress_manager import progress_manager
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ class SchedulerManager:
             self.scheduler.add_job(
                 func=execute_sync_job,
                 trigger='cron',
-                args=[job.id],
+                args=[job.id, progress_manager.update_progress],
                 id=job_id,
                 name=job.name,
                 **self._parse_cron_expression(job.cron_expression),
