@@ -255,6 +255,9 @@ class SyncEngine:
     def _create_table_safely(self, source_table, schema_name: str, table_name: str):
         """安全地创建表结构，避免GIN索引问题"""
         try:
+            # 首先创建必要的序列
+            self._create_sequences(source_table, schema_name, table_name)
+            
             # 创建目标表的元数据，但不包含索引
             dest_metadata = MetaData()
             
@@ -363,7 +366,75 @@ class SyncEngine:
                 return True
         
         return False
-    
+     
+    def _create_sequences(self, source_table, schema_name: str, table_name: str):
+         """创建表所需的序列"""
+         try:
+             with self.destination_engine.connect() as conn:
+                 with conn.begin():
+                     for column in source_table.columns:
+                         # 检查列是否有默认值且使用序列
+                         if column.default is not None:
+                             default_str = str(column.default.arg) if hasattr(column.default, 'arg') else str(column.default)
+                             
+                             # 检查是否使用nextval函数（序列）
+                             if 'nextval' in default_str.lower():
+                                 # 提取序列名
+                                 sequence_name = self._extract_sequence_name(default_str, schema_name, table_name, column.name)
+                                 
+                                 if sequence_name:
+                                     # 检查序列是否已存在
+                                     check_seq_sql = f"""
+                                     SELECT EXISTS (
+                                         SELECT 1 FROM information_schema.sequences 
+                                         WHERE sequence_schema = '{schema_name}' 
+                                         AND sequence_name = '{sequence_name}'
+                                     )
+                                     """
+                                     
+                                     result = conn.execute(text(check_seq_sql)).scalar()
+                                     
+                                     if not result:
+                                         # 创建序列
+                                         create_seq_sql = f"CREATE SEQUENCE {schema_name}.{sequence_name}"
+                                         conn.execute(text(create_seq_sql))
+                                         logger.info(f"Created sequence {schema_name}.{sequence_name}")
+                                     else:
+                                         logger.info(f"Sequence {schema_name}.{sequence_name} already exists")
+                                         
+         except Exception as e:
+             logger.warning(f"Failed to create sequences for {schema_name}.{table_name}: {e}")
+     
+    def _extract_sequence_name(self, default_str: str, schema_name: str, table_name: str, column_name: str) -> str:
+         """从默认值字符串中提取序列名"""
+         try:
+             # 常见的序列命名模式
+             if 'nextval' in default_str.lower():
+                 # 尝试从字符串中提取序列名
+                 import re
+                 
+                 # 匹配 nextval('schema.sequence_name'::regclass) 或类似模式
+                 pattern = r"nextval\(['\"]([^'\"]+)['\"].*\)"
+                 match = re.search(pattern, default_str)
+                 
+                 if match:
+                     full_sequence_name = match.group(1)
+                     # 如果包含schema，提取序列名部分
+                     if '.' in full_sequence_name:
+                         return full_sequence_name.split('.')[-1]
+                     else:
+                         return full_sequence_name
+                 else:
+                     # 如果无法解析，使用标准命名约定
+                     return f"{table_name}_{column_name}_seq"
+             
+             return None
+             
+         except Exception as e:
+             logger.warning(f"Failed to extract sequence name from {default_str}: {e}")
+             # 返回标准命名约定
+             return f"{table_name}_{column_name}_seq"
+     
     def _sync_table_data(self, target_table) -> int:
         """
         同步表数据（支持每表独立增量同步策略）
