@@ -318,11 +318,75 @@ class SyncEngine:
                     except (TypeError, ValueError) as e:
                         logger.warning(f"Failed to serialize field {key}: {e}, using string representation")
                         processed_record[key] = str(value)
+                elif isinstance(value, str) and self._is_json_field(key, value):
+                    # 处理可能是JSON字符串的字段
+                    processed_record[key] = self._sanitize_json_string(value)
                 else:
                     processed_record[key] = value
             processed_data.append(processed_record)
         
         return processed_data
+    
+    def _is_json_field(self, field_name: str, value: str) -> bool:
+        """判断字段是否可能是JSON字段"""
+        if not isinstance(value, str) or not value.strip():
+            return False
+        
+        # 检查字段名是否暗示这是JSON字段
+        json_field_indicators = [
+            'json', 'data', 'metadata', 'config', 'settings', 'params', 
+            'properties', 'attributes', 'extra', 'custom', 'payload'
+        ]
+        
+        field_lower = field_name.lower()
+        if any(indicator in field_lower for indicator in json_field_indicators):
+            return True
+        
+        # 检查值是否看起来像JSON
+        value_stripped = value.strip()
+        if (value_stripped.startswith(('{', '[')) and value_stripped.endswith(('}', ']'))) or \
+           value_stripped.startswith('"') and value_stripped.endswith('"'):
+            return True
+        
+        return False
+    
+    def _sanitize_json_string(self, value: str) -> str:
+        """清理和验证JSON字符串"""
+        if not value or not isinstance(value, str):
+            return value
+        
+        value = value.strip()
+        
+        # 如果是空字符串，返回null
+        if not value:
+            return 'null'
+        
+        # 尝试解析和重新序列化以确保有效的JSON
+        try:
+            # 首先尝试作为JSON解析
+            parsed = json.loads(value)
+            # 重新序列化以确保格式正确
+            return json.dumps(parsed, ensure_ascii=False, separators=(',', ':'))
+        except (json.JSONDecodeError, TypeError):
+            # 如果不是有效的JSON，尝试作为普通字符串处理
+            try:
+                # 检查是否包含特殊字符需要转义
+                if any(char in value for char in ['/', '\\', '"', '\n', '\r', '\t']):
+                    # 转义特殊字符
+                    escaped_value = value.replace('\\', '\\\\')\
+                                        .replace('"', '\\"')\
+                                        .replace('/', '\\/')\
+                                        .replace('\n', '\\n')\
+                                        .replace('\r', '\\r')\
+                                        .replace('\t', '\\t')
+                    # 包装为JSON字符串
+                    return json.dumps(escaped_value, ensure_ascii=False)
+                else:
+                    # 简单字符串，直接包装
+                    return json.dumps(value, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"Failed to sanitize JSON string: {e}, using null")
+                return 'null'
     
     def _get_array_columns(self, schema_name: str, table_name: str) -> Dict[str, str]:
         """获取表中的PostgreSQL数组字段及其数据类型"""
