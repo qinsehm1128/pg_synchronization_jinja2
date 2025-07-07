@@ -205,6 +205,19 @@
                                     <i class="fas fa-sync-alt me-1"></i>加载表
                                 </button>
                             </div>
+                            
+                            <!-- 表筛选搜索框 -->
+                            <div id="tableFilterContainer" style="display: none;" class="mb-3">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                                    <input type="text" class="form-control" id="tableFilterInput" placeholder="搜索表名或所有者..." oninput="filterTables()">
+                                    <button class="btn btn-outline-secondary" type="button" onclick="clearTableFilter()">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                </div>
+                                <div class="form-text small">支持按表名或所有者进行模糊搜索</div>
+                            </div>
+                            
                             <div id="tablesContainer">
                                 <p class="text-muted text-center">请先选择源数据库，然后点击"加载表"按钮</p>
                             </div>

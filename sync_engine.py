@@ -244,15 +244,125 @@ class SyncEngine:
                 # 目标表不存在，创建它
                 logger.info(f"Creating table {schema_name}.{table_name} in destination")
                 
-                # 在目标数据库中创建表
-                dest_metadata = MetaData()
-                dest_table = source_table.tometadata(dest_metadata, schema=schema_name)
-                dest_metadata.create_all(self.destination_engine)
+                # 安全地创建表结构，避免索引问题
+                self._create_table_safely(source_table, schema_name, table_name)
                 
                 logger.info(f"Table {schema_name}.{table_name} created successfully")
                 
         except Exception as e:
             raise Exception(f"Failed to sync table structure for {schema_name}.{table_name}: {e}")
+    
+    def _create_table_safely(self, source_table, schema_name: str, table_name: str):
+        """安全地创建表结构，避免GIN索引问题"""
+        try:
+            # 创建目标表的元数据，但不包含索引
+            dest_metadata = MetaData()
+            
+            # 复制表结构但排除索引
+            dest_table = Table(
+                table_name,
+                dest_metadata,
+                schema=schema_name
+            )
+            
+            # 复制列定义
+            for column in source_table.columns:
+                # 创建新列，但不复制索引相关属性
+                new_column = column.copy()
+                new_column.index = False  # 禁用自动索引创建
+                dest_table.append_column(new_column)
+            
+            # 复制主键约束
+            if source_table.primary_key.columns:
+                dest_table.append_constraint(
+                    source_table.primary_key.copy()
+                )
+            
+            # 复制外键约束（如果需要）
+            for fk in source_table.foreign_keys:
+                try:
+                    dest_table.append_constraint(fk.constraint.copy())
+                except Exception as fk_error:
+                    logger.warning(f"Failed to copy foreign key constraint: {fk_error}")
+            
+            # 创建表（不包含索引）
+            dest_metadata.create_all(self.destination_engine)
+            
+            # 单独创建安全的索引
+            self._create_safe_indexes(source_table, schema_name, table_name)
+            
+        except Exception as e:
+            logger.error(f"Failed to create table safely: {e}")
+            # 如果安全创建失败，尝试原始方法
+            try:
+                dest_metadata = MetaData()
+                dest_table = source_table.tometadata(dest_metadata, schema=schema_name)
+                dest_metadata.create_all(self.destination_engine)
+                logger.warning(f"Fallback to original table creation method for {schema_name}.{table_name}")
+            except Exception as fallback_error:
+                raise Exception(f"Both safe and fallback table creation failed: {fallback_error}")
+    
+    def _create_safe_indexes(self, source_table, schema_name: str, table_name: str):
+        """为表创建安全的索引，避免GIN索引问题"""
+        try:
+            with self.destination_engine.connect() as conn:
+                with conn.begin():
+                    for index in source_table.indexes:
+                        try:
+                            # 检查索引类型和列类型
+                            index_name = f"{table_name}_{index.name}" if not index.name.startswith(table_name) else index.name
+                            
+                            # 构建安全的索引创建SQL
+                            columns = [col.name for col in index.columns]
+                            columns_str = ', '.join(columns)
+                            
+                            # 检查是否为字符串字段，避免使用GIN索引
+                            column_types = self._get_column_types(source_table, columns)
+                            
+                            # 根据列类型选择合适的索引类型
+                            if self._should_use_gin_index(column_types):
+                                # 对于适合GIN的类型（如数组、JSON），使用GIN
+                                index_sql = f"CREATE INDEX IF NOT EXISTS {index_name} ON {schema_name}.{table_name} USING gin ({columns_str})"
+                            else:
+                                # 对于普通字符串等类型，使用B-tree索引
+                                index_sql = f"CREATE INDEX IF NOT EXISTS {index_name} ON {schema_name}.{table_name} ({columns_str})"
+                            
+                            conn.execute(text(index_sql))
+                            logger.info(f"Created index {index_name} for table {schema_name}.{table_name}")
+                            
+                        except Exception as idx_error:
+                            logger.warning(f"Failed to create index {index.name} for {schema_name}.{table_name}: {idx_error}")
+                            # 继续创建其他索引
+                            continue
+                            
+        except Exception as e:
+            logger.warning(f"Failed to create indexes for {schema_name}.{table_name}: {e}")
+    
+    def _get_column_types(self, table, column_names: list) -> dict:
+        """获取列的数据类型"""
+        column_types = {}
+        for col_name in column_names:
+            for column in table.columns:
+                if column.name == col_name:
+                    column_types[col_name] = str(column.type).lower()
+                    break
+        return column_types
+    
+    def _should_use_gin_index(self, column_types: dict) -> bool:
+        """判断是否应该使用GIN索引"""
+        gin_suitable_types = {
+            'array', 'json', 'jsonb', 'tsvector', 'tsquery'
+        }
+        
+        for col_type in column_types.values():
+            # 检查是否为数组类型
+            if '[]' in col_type or 'array' in col_type:
+                return True
+            # 检查是否为JSON类型
+            if any(gin_type in col_type for gin_type in gin_suitable_types):
+                return True
+        
+        return False
     
     def _sync_table_data(self, target_table) -> int:
         """

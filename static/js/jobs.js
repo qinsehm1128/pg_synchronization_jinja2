@@ -621,8 +621,18 @@ async function loadSourceTables() {
 // 渲染表格列表（带筛选功能）
 function renderTablesWithFilter(filterText = '') {
     const container = document.getElementById('tablesContainer');
+    const filterContainer = document.getElementById('tableFilterContainer');
+    const filterInput = document.getElementById('tableFilterInput');
     const syncMode = document.getElementById('syncMode').value;
     const isIncremental = syncMode === 'incremental';
+    
+    // 显示筛选容器
+    if (filterContainer) {
+        filterContainer.style.display = 'block';
+        if (filterInput) {
+            filterInput.value = filterText;
+        }
+    }
     
     // 筛选表格
     const filteredTables = sourceTables.filter(table => 
@@ -630,24 +640,11 @@ function renderTablesWithFilter(filterText = '') {
         table.table_owner.toLowerCase().includes(filterText.toLowerCase())
     );
     
-    // 构建搜索框HTML
-    const searchBoxHtml = `
-        <div class="mb-3">
-            <div class="input-group input-group-sm">
-                <span class="input-group-text"><i class="fas fa-search"></i></span>
-                <input type="text" class="form-control" id="tableSearchInput" 
-                       placeholder="搜索表名或所有者..." value="${filterText}"
-                       oninput="filterTables(this.value)">
-                <button class="btn btn-outline-secondary" type="button" onclick="clearTableFilter()">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <small class="text-muted">找到 ${filteredTables.length} 个表（共 ${sourceTables.length} 个）</small>
-        </div>
-    `;
+    // 更新统计信息
+    const statsHtml = `<small class="text-muted d-block mb-2">找到 ${filteredTables.length} 个表（共 ${sourceTables.length} 个）</small>`;
     
     if (filteredTables.length === 0) {
-        container.innerHTML = searchBoxHtml + '<p class="text-muted text-center">没有找到匹配的表</p>';
+        container.innerHTML = statsHtml + '<p class="text-muted text-center">没有找到匹配的表</p>';
         return;
     }
     
@@ -691,19 +688,24 @@ function renderTablesWithFilter(filterText = '') {
         `;
     }).join('');
     
-    container.innerHTML = searchBoxHtml + tablesHtml;
+    container.innerHTML = statsHtml + tablesHtml;
 }
 
 // 筛选表格
-function filterTables(filterText) {
+function filterTables() {
+    const filterInput = document.getElementById('tableFilterInput');
+    const filterText = filterInput ? filterInput.value : '';
     renderTablesWithFilter(filterText);
 }
 
 // 清除筛选
- function clearTableFilter() {
-     document.getElementById('tableSearchInput').value = '';
-     renderTablesWithFilter('');
- }
+function clearTableFilter() {
+    const filterInput = document.getElementById('tableFilterInput');
+    if (filterInput) {
+        filterInput.value = '';
+        renderTablesWithFilter('');
+    }
+}
 
 // 获取选中的表格
 function getSelectedTables() {
@@ -902,15 +904,8 @@ function setTimeRangeCondition(timeRange) {
     
     const startDateStr = formatDate(startDate);
     
-    // 生成WHERE条件（使用通用的时间字段名）
-    const condition = `(
-        created_at >= '${startDateStr}' OR 
-        updated_at >= '${startDateStr}' OR 
-        create_time >= '${startDateStr}' OR 
-        update_time >= '${startDateStr}' OR 
-        timestamp >= '${startDateStr}' OR 
-        date >= '${startDateStr}'
-    )`;
+    // 生成WHERE条件（简化版本，主要使用updated_at字段）
+    const condition = `updated_at >= '${startDateStr}'`;
     
     whereConditionElement.value = condition;
     
