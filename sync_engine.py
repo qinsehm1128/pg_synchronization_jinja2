@@ -270,10 +270,6 @@ class SyncEngine:
             
             # 复制列定义，处理序列创建失败的列
             for column in source_table.columns:
-                # 创建新列，但不复制索引相关属性
-                new_column = column.copy()
-                new_column.index = False  # 禁用自动索引创建
-                
                 # 如果该列的序列创建失败，转换为BIGSERIAL
                 if column.name in failed_columns:
                     logger.info(f"Converting column {column.name} to BIGSERIAL due to sequence creation failure")
@@ -284,9 +280,14 @@ class SyncEngine:
                         BigInteger,
                         primary_key=column.primary_key,
                         nullable=column.nullable,
-                        autoincrement=True
+                        autoincrement=True,
+                        default=None  # 移除原始的nextval默认值
                     )
                     new_column.index = False
+                else:
+                    # 创建新列，但不复制索引相关属性
+                    new_column = column.copy()
+                    new_column.index = False  # 禁用自动索引创建
                 
                 dest_table.append_column(new_column)
             
