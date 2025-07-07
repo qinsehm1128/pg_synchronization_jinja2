@@ -217,110 +217,199 @@ class SyncEngine:
     
     def _sync_table_structure(self, schema_name: str, table_name: str):
         """同步表结构"""
+        logger.info(f"Starting table structure sync for {schema_name}.{table_name}")
+        
+        # 获取源表结构
+        logger.info(f"Loading source table metadata for {schema_name}.{table_name}")
+        source_metadata = MetaData()
+        
         try:
-            # 获取源表结构
-            source_metadata = MetaData()
             source_table = Table(
                 table_name, 
                 source_metadata, 
                 autoload_with=self.source_engine,
                 schema=schema_name
             )
+            logger.info(f"Source table loaded successfully. Columns: {[col.name for col in source_table.columns]}")
             
-            # 检查目标表是否存在
-            dest_metadata = MetaData()
+        except Exception as source_error:
+            # 源表不存在或加载失败
+            logger.error(f"Failed to load source table {schema_name}.{table_name}: {source_error}")
+            if "NoSuchTableError" in str(type(source_error)) or "does not exist" in str(source_error).lower():
+                raise Exception(f"Source table {schema_name}.{table_name} does not exist in source database. Please check your table configuration.")
+            else:
+                raise Exception(f"Failed to load source table {schema_name}.{table_name}: {source_error}")
+        
+        # 检查目标表是否存在
+        dest_metadata = MetaData()
+        
+        try:
+            logger.info(f"Checking if destination table {schema_name}.{table_name} exists")
+            # 尝试加载目标表
+            Table(
+                table_name, 
+                dest_metadata, 
+                autoload_with=self.destination_engine,
+                schema=schema_name
+            )
+            logger.info(f"Table {schema_name}.{table_name} already exists in destination")
+            
+        except Exception as check_error:
+            # 目标表不存在，创建它
+            logger.info(f"Destination table does not exist. Error: {check_error}")
+            logger.info(f"Creating table {schema_name}.{table_name} in destination")
             
             try:
-                # 尝试加载目标表
-                Table(
-                    table_name, 
-                    dest_metadata, 
-                    autoload_with=self.destination_engine,
-                    schema=schema_name
-                )
-                logger.info(f"Table {schema_name}.{table_name} already exists in destination")
-                
-            except Exception:
-                # 目标表不存在，创建它
-                logger.info(f"Creating table {schema_name}.{table_name} in destination")
-                
                 # 安全地创建表结构，避免索引问题
                 self._create_table_safely(source_table, schema_name, table_name)
-                
                 logger.info(f"Table {schema_name}.{table_name} created successfully")
                 
-        except Exception as e:
-            raise Exception(f"Failed to sync table structure for {schema_name}.{table_name}: {e}")
+            except Exception as create_error:
+                logger.error(f"Failed to create table {schema_name}.{table_name}: {create_error}")
+                logger.error(f"Exception details: {traceback.format_exc()}")
+                raise Exception(f"Failed to create table {schema_name}.{table_name}: {create_error}")
     
     def _create_table_safely(self, source_table, schema_name: str, table_name: str):
-        """安全地创建表结构，避免GIN索引问题"""
+        """安全地创建表结构，避免GIN索引问题，确保序列创建和表创建在同一事务中"""
         try:
             logger.info(f"Starting safe table creation for {schema_name}.{table_name}")
             
-            # 首先创建必要的序列
-            failed_columns = self._create_sequences(source_table, schema_name, table_name)
-            logger.info(f"Sequence creation completed. Failed columns: {list(failed_columns.keys())}")
-            
-            # 创建目标表的元数据，但不包含索引
-            dest_metadata = MetaData()
-            
-            # 复制表结构但排除索引
-            dest_table = Table(
-                table_name,
-                dest_metadata,
-                schema=schema_name
-            )
-            
-            # 复制列定义，处理序列创建失败的列
-            logger.info(f"Processing {len(source_table.columns)} columns for table {schema_name}.{table_name}")
-            for column in source_table.columns:
-                logger.info(f"Processing column: {column.name}, type: {column.type}, default: {column.default}")
-                
-                # 如果该列的序列创建失败，转换为BIGSERIAL
-                if column.name in failed_columns:
-                    logger.info(f"Converting column {column.name} to BIGSERIAL due to sequence creation failure")
-                    logger.info(f"Original column default: {column.default}")
+            # 在同一个事务中执行序列创建、表创建和索引创建
+            with self.destination_engine.connect() as conn:
+                with conn.begin():  # 开始一个事务
+                    logger.info(f"Started transaction for table creation: {schema_name}.{table_name}")
                     
-                    # 将列类型转换为BIGSERIAL（自动递增的BIGINT）
-                    from sqlalchemy import BigInteger
-                    new_column = Column(
-                        column.name,
-                        BigInteger,
-                        primary_key=column.primary_key,
-                        nullable=column.nullable,
-                        autoincrement=True,
-                        default=None  # 移除原始的nextval默认值
+                    # 1. 在这个事务里创建序列
+                    logger.info(f"开始为表 {schema_name}.{table_name} 创建序列...")
+                    failed_columns = self._create_sequences(source_table, schema_name, table_name, conn)
+                    logger.info(f"序列创建完成。失败的列: {list(failed_columns.keys())}")
+                    if failed_columns:
+                        logger.warning(f"警告: {len(failed_columns)} 个列的序列创建失败，将转换为BIGSERIAL类型")
+                    else:
+                        logger.info(f"所有序列创建成功！")
+                    
+                    # 创建目标表的元数据，但不包含索引
+                    dest_metadata = MetaData()
+                    
+                    # 复制表结构但排除索引
+                    dest_table = Table(
+                        table_name,
+                        dest_metadata,
+                        schema=schema_name
                     )
-                    new_column.index = False
-                    logger.info(f"Created BIGSERIAL column: {column.name}, autoincrement: {new_column.autoincrement}, default: {new_column.default}")
-                else:
-                    # 创建新列，但不复制索引相关属性
-                    new_column = column.copy()
-                    new_column.index = False  # 禁用自动索引创建
-                    logger.info(f"Copied column: {column.name}, type: {new_column.type}, default: {new_column.default}")
-                
-                dest_table.append_column(new_column)
-            
-            # 复制主键约束
-            if source_table.primary_key.columns:
-                dest_table.append_constraint(
-                    source_table.primary_key.copy()
-                )
-            
-            # 复制外键约束（如果需要）
-            for fk in source_table.foreign_keys:
-                try:
-                    dest_table.append_constraint(fk.constraint.copy())
-                except Exception as fk_error:
-                    logger.warning(f"Failed to copy foreign key constraint: {fk_error}")
-            
-            # 创建表（不包含索引）
-            logger.info(f"Creating table {schema_name}.{table_name} with {len(dest_table.columns)} columns")
-            dest_metadata.create_all(self.destination_engine)
-            logger.info(f"Table {schema_name}.{table_name} created successfully")
-            
-            # 单独创建安全的索引
-            self._create_safe_indexes(source_table, schema_name, table_name)
+                    
+                    # 复制列定义，处理序列创建失败的列
+                    logger.info(f"开始处理 {len(source_table.columns)} 个列，目标表: {schema_name}.{table_name}")
+                    for column in source_table.columns:
+                        logger.info(f"正在处理列: {column.name}, 类型: {column.type}, 默认值: {column.default}")
+                        
+                        # 如果该列的序列创建失败，转换为BIGSERIAL
+                        if column.name in failed_columns:
+                            logger.info(f"由于序列创建失败，将列 {column.name} 转换为BIGSERIAL类型")
+                            logger.info(f"原始列默认值: {column.default}")
+                            
+                            # 将列类型转换为BIGSERIAL（自动递增的BIGINT）
+                            from sqlalchemy import BigInteger
+                            new_column = Column(
+                                column.name,
+                                BigInteger,
+                                primary_key=column.primary_key,
+                                nullable=column.nullable,
+                                autoincrement=True,
+                                default=None  # 移除原始的nextval默认值
+                            )
+                            new_column.index = False
+                            logger.info(f"已创建BIGSERIAL列: {column.name}, 自动递增: {new_column.autoincrement}, 默认值: {new_column.default}")
+                        else:
+                            # 创建新列，但不复制索引相关属性
+                            new_column = column.copy()
+                            new_column.index = False  # 禁用自动索引创建
+                            
+                            # 检查是否为序列列，如果是，确保序列引用格式正确
+                            if new_column.default is not None:
+                                default_str = str(new_column.default.arg) if hasattr(new_column.default, 'arg') else str(new_column.default)
+                                if 'nextval' in default_str.lower():
+                                    logger.info(f"列 {column.name} 使用序列，原始默认值: {default_str}")
+                                    # 提取并验证序列名
+                                    full_sequence_name, sequence_name = self._extract_sequence_name(default_str, schema_name, table_name, column.name)
+                                    if full_sequence_name:
+                                        # 确保序列引用格式正确（不带引号）
+                                        corrected_default = f"nextval('{full_sequence_name}'::regclass)"
+                                        logger.info(f"修正序列引用格式: {corrected_default}")
+                                        # 更新列的默认值
+                                        from sqlalchemy import text as sql_text
+                                        new_column.default = sql_text(corrected_default)
+                            
+                            logger.info(f"已复制列: {column.name}, 类型: {new_column.type}, 默认值: {new_column.default}")
+                        
+                        dest_table.append_column(new_column)
+                        logger.info(f"列 {column.name} 已添加到目标表结构中")
+                    
+                    # 复制主键约束 - 修复SQLAlchemy警告
+                    if source_table.primary_key.columns:
+                        pk_columns = [col.name for col in source_table.primary_key.columns]
+                        logger.info(f"正在创建主键约束，包含列: {pk_columns}")
+                        logger.info(f"源表主键约束名称: {source_table.primary_key.name}")
+                        
+                        # 基于目标表中的实际列重新构建主键约束，避免列引用不一致
+                        from sqlalchemy import PrimaryKeyConstraint
+                        try:
+                            # 确保引用的是目标表中的实际列
+                            pk_table_columns = [dest_table.c[col_name] for col_name in pk_columns if col_name in dest_table.c]
+                            if pk_table_columns:
+                                # 使用标准的主键约束命名规范
+                                pk_constraint_name = f"{table_name}_pkey"
+                                primary_key_constraint = PrimaryKeyConstraint(*pk_table_columns, name=pk_constraint_name)
+                                dest_table.append_constraint(primary_key_constraint)
+                                
+                                logger.info(f"主键约束已成功添加到目标表，约束名称: {pk_constraint_name}")
+                                logger.info(f"主键约束包含的列数量: {len(pk_table_columns)}")
+                                logger.info(f"主键约束列详情: {[col.name for col in pk_table_columns]}")
+                            else:
+                                logger.error(f"错误: 无法在目标表中找到主键列 {pk_columns}")
+                        except Exception as pk_error:
+                            logger.error(f"创建主键约束时发生错误: {pk_error}")
+                            logger.error(f"主键约束创建错误详情: {traceback.format_exc()}")
+                    else:
+                        logger.warning(f"警告: 源表 {schema_name}.{table_name} 没有主键约束！")
+                    
+                    # 复制外键约束（如果需要）
+                    for fk in source_table.foreign_keys:
+                        try:
+                            dest_table.append_constraint(fk.constraint.copy())
+                        except Exception as fk_error:
+                            logger.warning(f"Failed to copy foreign key constraint: {fk_error}")
+                    
+                    # 2. 在同一个事务里创建表
+                    logger.info(f"正在创建表 {schema_name}.{table_name}，包含 {len(dest_table.columns)} 个列")
+                    logger.info(f"表结构详情: 主键列数={len(dest_table.primary_key.columns) if dest_table.primary_key else 0}, 约束数={len(dest_table.constraints)}")
+                    
+                    # 打印即将创建的表的详细信息
+                    for col in dest_table.columns:
+                        logger.info(f"列详情: {col.name} - 类型: {col.type}, 主键: {col.primary_key}, 可空: {col.nullable}, 默认值: {col.default}")
+                    
+                    dest_metadata.create_all(conn, checkfirst=False)  # 使用同一个连接
+                    logger.info(f"表 {schema_name}.{table_name} 创建成功！")
+                    
+                    # 验证表是否真正创建成功
+                    from sqlalchemy import text as sql_text
+                    verify_sql = f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'"
+                    table_exists = conn.execute(sql_text(verify_sql)).scalar()
+                    logger.info(f"表创建验证: {schema_name}.{table_name} 存在性检查结果 = {table_exists}")
+                    
+                    # 验证主键约束是否创建成功
+                    pk_verify_sql = f"""SELECT constraint_name, column_name 
+                                        FROM information_schema.key_column_usage 
+                                        WHERE table_schema = '{schema_name}' 
+                                        AND table_name = '{table_name}' 
+                                        AND constraint_name LIKE '%pkey%'"""
+                    pk_result = conn.execute(sql_text(pk_verify_sql)).fetchall()
+                    logger.info(f"主键约束验证结果: {[(row[0], row[1]) for row in pk_result]}")
+                    
+                    # 3. 在同一个事务里创建索引
+                    self._create_safe_indexes(source_table, schema_name, table_name, conn)
+                    
+                    logger.info(f"Transaction completed successfully for table {schema_name}.{table_name}")
             
         except Exception as e:
             logger.error(f"Failed to create table safely: {e}")
@@ -336,41 +425,60 @@ class SyncEngine:
                 logger.error(f"Fallback table creation also failed: {fallback_error}")
                 raise Exception(f"Both safe and fallback table creation failed: {fallback_error}")
     
-    def _create_safe_indexes(self, source_table, schema_name: str, table_name: str):
-        """为表创建安全的索引，避免GIN索引问题"""
+    def _create_safe_indexes(self, source_table, schema_name: str, table_name: str, conn):
+        """为表创建安全的索引，避免GIN索引问题，使用传入的连接对象"""
         try:
-            with self.destination_engine.connect() as conn:
-                with conn.begin():
-                    for index in source_table.indexes:
-                        try:
-                            # 检查索引类型和列类型
-                            index_name = f"{table_name}_{index.name}" if not index.name.startswith(table_name) else index.name
-                            
-                            # 构建安全的索引创建SQL
-                            columns = [col.name for col in index.columns]
-                            columns_str = ', '.join(columns)
-                            
-                            # 检查是否为字符串字段，避免使用GIN索引
-                            column_types = self._get_column_types(source_table, columns)
-                            
-                            # 根据列类型选择合适的索引类型
-                            if self._should_use_gin_index(column_types):
-                                # 对于适合GIN的类型（如数组、JSON），使用GIN
-                                index_sql = f"CREATE INDEX IF NOT EXISTS {index_name} ON {schema_name}.{table_name} USING gin ({columns_str})"
-                            else:
-                                # 对于普通字符串等类型，使用B-tree索引
-                                index_sql = f"CREATE INDEX IF NOT EXISTS {index_name} ON {schema_name}.{table_name} ({columns_str})"
-                            
-                            conn.execute(text(index_sql))
-                            logger.info(f"Created index {index_name} for table {schema_name}.{table_name}")
-                            
-                        except Exception as idx_error:
-                            logger.warning(f"Failed to create index {index.name} for {schema_name}.{table_name}: {idx_error}")
-                            # 继续创建其他索引
-                            continue
-                            
+            logger.info(f"开始为表 {schema_name}.{table_name} 创建索引，共 {len(source_table.indexes)} 个索引")
+            
+            for index in source_table.indexes:
+                try:
+                    # 检查索引类型和列类型
+                    index_name = f"{table_name}_{index.name}" if not index.name.startswith(table_name) else index.name
+                    
+                    # 构建安全的索引创建SQL
+                    columns = [col.name for col in index.columns]
+                    columns_str = ', '.join(columns)
+                    
+                    # 检查列类型
+                    column_types = self._get_column_types(source_table, columns)
+                    logger.info(f"索引 {index_name} 的列类型: {column_types}")
+                    
+                    # 检查是否有不支持索引的类型
+                    unsupported_for_any_index = {'unknown', 'void'}
+                    has_unsupported_type = any(
+                        any(unsupported in col_type.lower() for unsupported in unsupported_for_any_index)
+                        for col_type in column_types.values()
+                    )
+                    
+                    if has_unsupported_type:
+                        logger.warning(f"跳过索引 {index_name}，包含不支持索引的数据类型: {column_types}")
+                        continue
+                    
+                    # 根据列类型选择合适的索引类型
+                    if self._should_use_gin_index(column_types):
+                        # 对于适合GIN的类型（如数组、JSON），使用GIN
+                        index_sql = f"CREATE INDEX IF NOT EXISTS {index_name} ON {schema_name}.{table_name} USING gin ({columns_str})"
+                        logger.info(f"创建GIN索引: {index_name}")
+                    else:
+                        # 对于普通类型，使用B-tree索引
+                        index_sql = f"CREATE INDEX IF NOT EXISTS {index_name} ON {schema_name}.{table_name} ({columns_str})"
+                        logger.info(f"创建B-tree索引: {index_name}")
+                    
+                    from sqlalchemy import text as sql_text
+                    conn.execute(sql_text(index_sql))
+                    logger.info(f"索引 {index_name} 创建成功")
+                    
+                except Exception as idx_error:
+                    logger.warning(f"索引 {index.name} 创建失败: {idx_error}")
+                    logger.warning(f"索引创建错误详情: {traceback.format_exc()}")
+                    # 继续创建其他索引
+                    continue
+            
+            logger.info(f"表 {schema_name}.{table_name} 的索引创建过程完成")
+                    
         except Exception as e:
-            logger.warning(f"Failed to create indexes for {schema_name}.{table_name}: {e}")
+            logger.warning(f"为表 {schema_name}.{table_name} 创建索引时发生错误: {e}")
+            logger.warning(f"索引创建异常详情: {traceback.format_exc()}")
     
     def _get_column_types(self, table, column_names: list) -> dict:
         """获取列的数据类型"""
@@ -388,76 +496,123 @@ class SyncEngine:
             'array', 'json', 'jsonb', 'tsvector', 'tsquery'
         }
         
+        # 不支持GIN索引的类型
+        gin_unsupported_types = {
+            'character varying', 'varchar', 'text', 'char', 'character',
+            'integer', 'bigint', 'smallint', 'numeric', 'decimal',
+            'real', 'double precision', 'boolean', 'date', 'timestamp',
+            'timestamptz', 'time', 'timetz', 'interval', 'uuid'
+        }
+        
         for col_type in column_types.values():
+            col_type_lower = col_type.lower()
+            
+            # 首先检查是否为明确不支持GIN的类型
+            if any(unsupported_type in col_type_lower for unsupported_type in gin_unsupported_types):
+                continue  # 跳过不支持的类型
+            
             # 检查是否为数组类型
-            if '[]' in col_type or 'array' in col_type:
+            if '[]' in col_type_lower or 'array' in col_type_lower:
                 return True
             # 检查是否为JSON类型
-            if any(gin_type in col_type for gin_type in gin_suitable_types):
+            if any(gin_type in col_type_lower for gin_type in gin_suitable_types):
                 return True
         
         return False
      
-    def _create_sequences(self, source_table, schema_name: str, table_name: str) -> dict:
-         """创建表所需的序列，返回失败的列信息"""
+    def _create_sequences(self, source_table, schema_name: str, table_name: str, conn) -> dict:
+         """创建表所需的序列，返回失败的列信息，使用传入的连接对象"""
          failed_columns = {}
+         logger.info(f"Starting sequence creation for table {schema_name}.{table_name}")
+         
          try:
-             with self.destination_engine.connect() as conn:
-                 with conn.begin():
-                     for column in source_table.columns:
-                         # 检查列是否有默认值且使用序列
-                         if column.default is not None:
-                             default_str = str(column.default.arg) if hasattr(column.default, 'arg') else str(column.default)
-                             
-                             # 检查是否使用nextval函数（序列）
-                             if 'nextval' in default_str.lower():
-                                 # 提取序列名
-                                 full_sequence_name, sequence_name = self._extract_sequence_name(default_str, schema_name, table_name, column.name)
+             sequence_columns_found = 0
+             for column in source_table.columns:
+                 # 检查列是否有默认值且使用序列
+                 if column.default is not None:
+                     default_str = str(column.default.arg) if hasattr(column.default, 'arg') else str(column.default)
+                     logger.info(f"Checking column {column.name} with default: {default_str}")
+                     
+                     # 检查是否使用nextval函数（序列）
+                     if 'nextval' in default_str.lower():
+                         sequence_columns_found += 1
+                         logger.info(f"Found sequence column: {column.name} with default: {default_str}")
+                         
+                         # 提取序列名
+                         full_sequence_name, sequence_name = self._extract_sequence_name(default_str, schema_name, table_name, column.name)
+                         logger.info(f"Extracted sequence name: {full_sequence_name} (base: {sequence_name})")
+                         
+                         if sequence_name:
+                             try:
+                                 # 解析完整序列名的schema和名称
+                                 if '.' in full_sequence_name:
+                                     seq_schema, seq_name = full_sequence_name.split('.', 1)
+                                     # 清理schema名中的引号
+                                     seq_schema = seq_schema.strip('"').strip("'")
+                                     seq_name = seq_name.strip('"').strip("'")
+                                 else:
+                                     seq_schema, seq_name = schema_name, sequence_name
+                                     seq_name = seq_name.strip('"').strip("'")
                                  
-                                 if sequence_name:
-                                     try:
-                                         # 解析完整序列名的schema和名称
-                                         if '.' in full_sequence_name:
-                                             seq_schema, seq_name = full_sequence_name.split('.', 1)
-                                         else:
-                                             seq_schema, seq_name = schema_name, sequence_name
-                                         
-                                         # 检查序列是否已存在
-                                         check_seq_sql = f"""
-                                         SELECT EXISTS (
-                                             SELECT 1 FROM information_schema.sequences 
-                                             WHERE sequence_schema = '{seq_schema}' 
-                                             AND sequence_name = '{seq_name}'
-                                         )
-                                         """
-                                         
-                                         result = conn.execute(text(check_seq_sql)).scalar()
-                                         
-                                         if not result:
-                                             # 创建序列
-                                             create_seq_sql = f"CREATE SEQUENCE {full_sequence_name}"
-                                             conn.execute(text(create_seq_sql))
-                                             logger.info(f"Created sequence {full_sequence_name}")
-                                         else:
-                                             logger.info(f"Sequence {full_sequence_name} already exists")
-                                             
-                                     except Exception as seq_error:
-                                         logger.warning(f"Failed to create sequence {full_sequence_name}: {seq_error}")
-                                         # 记录失败的列，稍后转换为BIGSERIAL
-                                         failed_columns[column.name] = {
-                                             'column': column,
-                                             'sequence_name': full_sequence_name,
-                                             'error': str(seq_error),
-                                             'default_str': default_str
-                                         }
+                                 logger.info(f"正在检查序列是否存在: schema={seq_schema}, name={seq_name}")
+                                 
+                                 # 检查序列是否已存在
+                                 check_seq_sql = f"""
+                                 SELECT EXISTS (
+                                     SELECT 1 FROM information_schema.sequences 
+                                     WHERE sequence_schema = '{seq_schema}' 
+                                     AND sequence_name = '{seq_name}'
+                                 )
+                                 """
+                                 
+                                 from sqlalchemy import text as sql_text
+                                 result = conn.execute(sql_text(check_seq_sql)).scalar()
+                                 logger.info(f"序列存在性检查结果: {result}")
+                                 
+                                 if not result:
+                                     # 创建序列时不使用引号包围schema名
+                                     clean_full_name = f"{seq_schema}.{seq_name}"
+                                     create_seq_sql = f"CREATE SEQUENCE {clean_full_name}"
+                                     logger.info(f"正在创建序列，SQL: {create_seq_sql}")
+                                     conn.execute(sql_text(create_seq_sql))
+                                     logger.info(f"序列创建成功: {clean_full_name}")
+                                     
+                                     # 验证序列是否真正创建成功
+                                     verify_result = conn.execute(sql_text(check_seq_sql)).scalar()
+                                     logger.info(f"序列创建验证结果: {verify_result}")
+                                 else:
+                                     logger.info(f"序列 {seq_schema}.{seq_name} 已存在，跳过创建")
+                                     
+                             except Exception as seq_error:
+                                 logger.error(f"Failed to create sequence {full_sequence_name}: {seq_error}")
+                                 logger.error(f"Sequence creation error details: {traceback.format_exc()}")
+                                 # 记录失败的列，稍后转换为BIGSERIAL
+                                 failed_columns[column.name] = {
+                                     'column': column,
+                                     'sequence_name': full_sequence_name,
+                                     'error': str(seq_error),
+                                     'default_str': default_str
+                                 }
+                                 logger.info(f"Added column {column.name} to failed_columns list")
+                         else:
+                             logger.warning(f"Could not extract sequence name from default: {default_str}")
+                     else:
+                         logger.debug(f"Column {column.name} does not use sequence (default: {default_str})")
+                 else:
+                     logger.debug(f"Column {column.name} has no default value")
+             
+             logger.info(f"Sequence creation completed. Found {sequence_columns_found} sequence columns, {len(failed_columns)} failed")
                                          
          except Exception as e:
-             logger.warning(f"Failed to create sequences for {schema_name}.{table_name}: {e}")
+             logger.error(f"Failed to create sequences for {schema_name}.{table_name}: {e}")
+             logger.error(f"Sequence creation exception details: {traceback.format_exc()}")
              
          return failed_columns
      
     def _extract_sequence_name(self, default_str: str, schema_name: str, table_name: str, column_name: str) -> tuple:
          """从默认值字符串中提取序列名，返回(完整序列名, 序列名)"""
+         logger.info(f"Extracting sequence name from default_str: {default_str}")
+         
          try:
              # 常见的序列命名模式
              if 'nextval' in default_str.lower():
@@ -475,35 +630,53 @@ class SyncEngine:
                      r"nextval\(\"([^\"]+)\".*\)"  # 双引号模式
                  ]
                  
-                 for pattern in patterns:
+                 logger.info(f"Trying to match patterns against: {default_str}")
+                 
+                 for i, pattern in enumerate(patterns):
+                     logger.debug(f"Trying pattern {i+1}: {pattern}")
                      match = re.search(pattern, default_str)
                      if match:
                          full_sequence_name = match.group(1)
+                         logger.info(f"Pattern {i+1} matched, extracted: {full_sequence_name}")
+                         
                          # 清理可能的转义字符和引号
                          full_sequence_name = full_sequence_name.replace('\\"', '').replace('"', '')
+                         logger.info(f"After cleaning: {full_sequence_name}")
                          
                          # 如果包含schema，分别提取schema和序列名
                          if '.' in full_sequence_name:
                              parts = full_sequence_name.split('.')
-                             extracted_schema = parts[0]
-                             sequence_name = parts[-1]
-                             # 返回完整名称和序列名
-                             return f"{extracted_schema}.{sequence_name}", sequence_name
+                             extracted_schema = parts[0].strip('"').strip("'")
+                             sequence_name = parts[-1].strip('"').strip("'")
+                             # 确保返回的格式不包含引号
+                             result = f"{extracted_schema}.{sequence_name}", sequence_name
+                             logger.info(f"Schema found, returning: {result}")
+                             return result
                          else:
                              # 没有schema，使用当前schema
-                             return f"{schema_name}.{full_sequence_name}", full_sequence_name
+                             clean_sequence_name = full_sequence_name.strip('"').strip("'")
+                             result = f"{schema_name}.{clean_sequence_name}", clean_sequence_name
+                             logger.info(f"No schema found, using current schema: {result}")
+                             return result
                  
                  # 如果无法解析，使用标准命名约定
+                 logger.warning(f"No pattern matched, using standard naming convention")
                  standard_name = f"{table_name}_{column_name}_seq"
-                 return f"{schema_name}.{standard_name}", standard_name
+                 result = f"{schema_name}.{standard_name}", standard_name
+                 logger.info(f"Standard naming result: {result}")
+                 return result
              
+             logger.info(f"No nextval found in default_str, returning None")
              return None, None
              
          except Exception as e:
-             logger.warning(f"Failed to extract sequence name from {default_str}: {e}")
+             logger.error(f"Failed to extract sequence name from {default_str}: {e}")
+             logger.error(f"Sequence name extraction error details: {traceback.format_exc()}")
              # 返回标准命名约定
              standard_name = f"{table_name}_{column_name}_seq"
-             return f"{schema_name}.{standard_name}", standard_name
+             result = f"{schema_name}.{standard_name}", standard_name
+             logger.info(f"Exception fallback result: {result}")
+             return result
      
     def _sync_table_data(self, target_table) -> int:
         """
