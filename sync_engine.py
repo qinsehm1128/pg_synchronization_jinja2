@@ -282,7 +282,7 @@ class SyncEngine:
             raise Exception(f"Failed to sync data for {schema_name}.{table_name}: {e}")
     
     def _preprocess_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """预处理数据，将字典和列表字段序列化为JSON字符串"""
+        """预处理数据，将字典和列表字段序列化为JSON字符串或PostgreSQL数组格式"""
         processed_data = []
         
         for record in data:
@@ -300,6 +300,113 @@ class SyncEngine:
             processed_data.append(processed_record)
         
         return processed_data
+    
+    def _preprocess_data_with_arrays(self, data: List[Dict[str, Any]], array_columns: Dict[str, str]) -> List[Dict[str, Any]]:
+        """预处理数据，包括PostgreSQL数组字段的特殊处理"""
+        processed_data = []
+        
+        for record in data:
+            processed_record = {}
+            for key, value in record.items():
+                if key in array_columns:
+                    # 处理PostgreSQL数组字段
+                    processed_record[key] = self._format_postgresql_array(value, array_columns[key])
+                elif isinstance(value, (dict, list)):
+                    # 将字典和列表序列化为JSON字符串
+                    try:
+                        processed_record[key] = json.dumps(value, ensure_ascii=False, default=str)
+                    except (TypeError, ValueError) as e:
+                        logger.warning(f"Failed to serialize field {key}: {e}, using string representation")
+                        processed_record[key] = str(value)
+                else:
+                    processed_record[key] = value
+            processed_data.append(processed_record)
+        
+        return processed_data
+    
+    def _get_array_columns(self, schema_name: str, table_name: str) -> Dict[str, str]:
+        """获取表中的PostgreSQL数组字段及其数据类型"""
+        try:
+            query = """
+                SELECT column_name, data_type, udt_name
+                FROM information_schema.columns 
+                WHERE table_schema = :schema_name 
+                  AND table_name = :table_name 
+                  AND (data_type = 'ARRAY' OR udt_name LIKE '%[]')
+                ORDER BY ordinal_position
+            """
+            
+            with self.destination_engine.connect() as conn:
+                result = conn.execute(
+                    text(query), 
+                    {'schema_name': schema_name, 'table_name': table_name}
+                )
+                return {row[0]: row[2] for row in result}  # column_name: udt_name
+                
+        except Exception as e:
+            logger.warning(f"Failed to get array columns for {schema_name}.{table_name}: {e}")
+            return {}
+    
+    def _format_postgresql_array(self, value: Any, array_type: str) -> str:
+        """将Python值格式化为PostgreSQL数组格式"""
+        if value is None:
+            return None
+        
+        # 如果已经是字符串且看起来像PostgreSQL数组格式，直接返回
+        if isinstance(value, str):
+            if value.startswith('{') and value.endswith('}'):
+                return value
+            # 如果是JSON数组格式，需要转换
+            if value.startswith('[') and value.endswith(']'):
+                try:
+                    # 解析JSON数组
+                    json_array = json.loads(value)
+                    return self._convert_to_pg_array(json_array, array_type)
+                except (json.JSONDecodeError, TypeError):
+                    # 如果解析失败，当作普通字符串处理
+                    return value
+            return value
+        
+        # 如果是Python列表，转换为PostgreSQL数组格式
+        if isinstance(value, list):
+            return self._convert_to_pg_array(value, array_type)
+        
+        # 其他类型，转换为字符串
+        return str(value)
+    
+    def _convert_to_pg_array(self, python_list: list, array_type: str) -> str:
+        """将Python列表转换为PostgreSQL数组格式"""
+        if not python_list:
+            return '{}'
+        
+        # 根据数组类型决定是否需要引号
+        needs_quotes = self._array_element_needs_quotes(array_type)
+        
+        formatted_elements = []
+        for item in python_list:
+            if item is None:
+                formatted_elements.append('NULL')
+            elif needs_quotes:
+                # 转义引号和反斜杠
+                escaped_item = str(item).replace('\\', '\\\\').replace('"', '\\"')
+                formatted_elements.append(f'"{escaped_item}"')
+            else:
+                formatted_elements.append(str(item))
+        
+        return '{' + ','.join(formatted_elements) + '}'
+    
+    def _array_element_needs_quotes(self, array_type: str) -> bool:
+        """判断数组元素是否需要引号"""
+        # 数值类型不需要引号
+        numeric_types = {
+            '_int2', '_int4', '_int8', '_float4', '_float8', '_numeric',
+            '_smallint', '_integer', '_bigint', '_real', '_double', '_decimal'
+        }
+        
+        # 布尔类型不需要引号
+        boolean_types = {'_bool', '_boolean'}
+        
+        return array_type not in numeric_types and array_type not in boolean_types
     
     def _build_sync_query(self, target_table) -> str:
         """
@@ -523,8 +630,11 @@ class SyncEngine:
             if not data:
                 return
             
-            # 预处理数据，序列化字典和列表字段
-            processed_data = self._preprocess_data(data)
+            # 获取PostgreSQL数组字段信息
+            array_columns = self._get_array_columns(schema_name, table_name)
+            
+            # 预处理数据，包括PostgreSQL数组格式化
+            processed_data = self._preprocess_data_with_arrays(data, array_columns)
             
             full_table_name = f"{schema_name}.{table_name}"
             columns_str = ", ".join(columns)
