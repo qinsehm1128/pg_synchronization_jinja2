@@ -413,17 +413,34 @@ class SyncEngine:
                  # 尝试从字符串中提取序列名
                  import re
                  
-                 # 匹配 nextval('schema.sequence_name'::regclass) 或类似模式
-                 pattern = r"nextval\(['\"]([^'\"]+)['\"].*\)"
-                 match = re.search(pattern, default_str)
+                 # 匹配多种模式：
+                 # nextval('schema.sequence_name'::regclass)
+                 # nextval('"schema".sequence_name'::regclass)
+                 # nextval('sequence_name'::regclass)
+                 patterns = [
+                     r"nextval\(['\"]([^'\"]+)['\"].*\)",  # 基本模式
+                     r"nextval\(['\"]\\?\"?([^'\"]+)\\?\"?['\"].*\)",  # 处理转义引号
+                     r"nextval\('([^']+)'.*\)",  # 单引号模式
+                     r"nextval\(\"([^\"]+)\".*\)"  # 双引号模式
+                 ]
                  
-                 if match:
-                     full_sequence_name = match.group(1)
-                     # 如果包含schema，提取序列名部分
-                     if '.' in full_sequence_name:
-                         return full_sequence_name.split('.')[-1]
-                     else:
-                         return full_sequence_name
+                 sequence_name = None
+                 for pattern in patterns:
+                     match = re.search(pattern, default_str)
+                     if match:
+                         full_sequence_name = match.group(1)
+                         # 清理可能的转义字符和引号
+                         full_sequence_name = full_sequence_name.replace('\\"', '').replace('"', '')
+                         
+                         # 如果包含schema，提取序列名部分
+                         if '.' in full_sequence_name:
+                             sequence_name = full_sequence_name.split('.')[-1]
+                         else:
+                             sequence_name = full_sequence_name
+                         break
+                 
+                 if sequence_name:
+                     return sequence_name
                  else:
                      # 如果无法解析，使用标准命名约定
                      return f"{table_name}_{column_name}_seq"
