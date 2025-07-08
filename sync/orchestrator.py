@@ -6,7 +6,7 @@
 import logging
 import traceback
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -15,12 +15,15 @@ from sqlalchemy.engine import Engine
 from database import SessionLocal
 from models.backup_jobs import BackupJob
 from models.job_execution_logs import JobExecutionLog, ExecutionStatus
+from models.job_execution_status import JobExecutionStatus, TaskControlStatus
 from models.database_connections import DatabaseConnection
 from utils.encryption import decrypt_connection_string
 
 # 使用相对路径导入同个包内的模块
 from .schema_manager import SchemaManager
 from .data_manager import DataManager
+from .status_manager import StatusManager
+import psycopg2
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,7 @@ class SyncEngine:
 
         self.schema_manager = SchemaManager(self.source_engine, self.destination_engine)
         self.data_manager = DataManager(self.job, self.source_engine, self.destination_engine, self.db_session)
+        self.status_manager = StatusManager(self.db_session)
 
         self.current_progress = {
             'stage': 'initializing', 'total_tables': 0, 'tables_completed': 0,
@@ -50,16 +54,28 @@ class SyncEngine:
 
     def execute(self):
         """执行同步任务"""
+        status_record = None
         try:
+            # 创建状态记录
+            status_record = self.status_manager.create_execution_status(
+                job_id=self.job_id, 
+                execution_log_id=self.log_entry.id
+            )
+            
             self._update_log("Sync process started.")
-            self._perform_sync()
+            self._perform_sync(status_record)
             self._finalize_execution(ExecutionStatus.SUCCESS, "Sync completed successfully.")
+            self.status_manager.mark_completed(status_record.id)
         except InterruptedError as e:
             logger.info(f"Sync for job {self.job_id} was cancelled.")
             self._finalize_execution(ExecutionStatus.CANCELLED, str(e))
+            if status_record:
+                self.status_manager.mark_cancelled(status_record.id)
         except Exception as e:
             logger.error(f"Sync job {self.job_id} failed: {e}", exc_info=True)
             self._finalize_execution(ExecutionStatus.FAILED, str(e), traceback.format_exc())
+            if status_record:
+                self.status_manager.mark_failed(status_record.id)
         finally:
             self._cleanup()
 
@@ -94,7 +110,7 @@ class SyncEngine:
             return True
         return False
 
-    def _perform_sync(self):
+    def _perform_sync(self, status_record):
         """执行实际的表同步循环。"""
         target_tables = [t for t in self.job.target_tables if t.is_active]
         if not target_tables:
@@ -105,7 +121,8 @@ class SyncEngine:
         total_records_synced = 0
 
         for i, table in enumerate(target_tables):
-            if self._check_if_cancelled():
+            # 使用状态管理器检查取消状态
+            if self.status_manager.is_cancelled(status_record.id) or self._check_if_cancelled():
                 raise InterruptedError("Task cancelled by user.")
 
             full_table_name = f"{table.schema_name}.{table.table_name}"
@@ -118,7 +135,7 @@ class SyncEngine:
             self._update_log(f"Processing table {i + 1}/{len(target_tables)}: {full_table_name}")
 
             self.schema_manager.sync_table_structure(table.schema_name, table.table_name)
-            records_count = self.data_manager.sync_table_data(table, self.current_progress, self._check_if_cancelled)
+            records_count = self.data_manager.sync_table_data(table, self.current_progress, lambda: self.status_manager.is_cancelled(status_record.id) or self._check_if_cancelled())
             total_records_synced += records_count
 
             self._update_log(f"Table {full_table_name} sync complete. Synced {records_count} records.")

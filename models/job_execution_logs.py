@@ -39,6 +39,7 @@ class JobExecutionLog(Base):
     
     # 关系
     job = relationship("BackupJob", back_populates="execution_logs")
+    execution_status = relationship("JobExecutionStatus", back_populates="execution_log", uselist=False)
     
     def __repr__(self):
         return f"<JobExecutionLog(id={self.id}, job_id={self.job_id}, status='{self.status.value}')>"

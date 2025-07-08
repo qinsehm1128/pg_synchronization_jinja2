@@ -19,7 +19,7 @@ from sqlalchemy import text
 from config import settings
 from database import init_db
 from scheduler import scheduler_manager
-from routers import connections, jobs, logs
+from routers import connections, jobs, logs, status
 from database import engine
 from progress_manager import progress_manager
 # 配置日志
@@ -73,6 +73,7 @@ templates = Jinja2Templates(directory="templates")
 app.include_router(connections.router, prefix="/api/connections", tags=["connections"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
+app.include_router(status.router, prefix="/api/status", tags=["status"])
 
 # 前端路由
 @app.get("/", response_class=HTMLResponse)
@@ -94,6 +95,11 @@ async def jobs_page(request: Request):
 async def logs_page(request: Request):
     """执行日志页面"""
     return templates.TemplateResponse("logs.html", {"request": request})
+
+@app.get("/status", response_class=HTMLResponse)
+async def status_page(request: Request):
+    """任务状态管理页面"""
+    return templates.TemplateResponse("status.html", {"request": request})
 
 @app.get("/api/jobs/{job_id}/progress")
 async def get_job_progress(job_id: int, request: Request):

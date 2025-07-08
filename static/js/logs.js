@@ -529,11 +529,31 @@ async function stopRunningLog(logId, jobId) {
     }
     
     try {
-        // 停止任务
-        await ApiClient.post(`/logs/${logId}/stop`);
+        // 首先尝试通过状态API停止任务
+        try {
+            // 获取当前运行的状态记录
+            const runningStatuses = await ApiClient.get('/status/running');
+            const currentStatus = runningStatuses.find(status => status.execution_log_id === logId);
+            
+            if (currentStatus) {
+                // 使用新的状态API停止任务
+                await ApiClient.post(`/status/${currentStatus.id}/cancel`);
+                Utils.showSuccess('任务停止请求已发送，正在等待任务响应...');
+            } else {
+                // 如果没有找到状态记录，回退到原来的方法
+                await ApiClient.post(`/logs/${logId}/stop`);
+                Utils.showSuccess('任务已停止');
+            }
+        } catch (statusError) {
+            console.warn('使用状态API停止失败，回退到日志API:', statusError);
+            // 回退到原来的方法
+            await ApiClient.post(`/logs/${logId}/stop`);
+            Utils.showSuccess('任务已停止');
+        }
+        
         // 重置运行状态
         await ApiClient.post(`/logs/job/${jobId}/reset-running-status`);
-        Utils.showSuccess('任务已停止并重置运行状态');
+        
         loadLogs(currentPage);
         loadSummary(); // 刷新统计
     } catch (error) {

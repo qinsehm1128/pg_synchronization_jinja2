@@ -75,6 +75,7 @@ class BackupJob(Base):
     destination_db = relationship("DatabaseConnection", foreign_keys=[destination_db_id])
     target_tables = relationship("JobTargetTable", back_populates="job", cascade="all, delete-orphan")
     execution_logs = relationship("JobExecutionLog", back_populates="job", cascade="all, delete-orphan")
+    execution_statuses = relationship("JobExecutionStatus", back_populates="job", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<BackupJob(id={self.id}, name='{self.name}', status='{self.status.value}')>"
