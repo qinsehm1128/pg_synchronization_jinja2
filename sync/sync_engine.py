@@ -70,7 +70,7 @@ class SyncEngine:
                     return True
             except Exception as e:
                 logger.warning(f"检查取消状态时出错: {e}")
-                
+                return True
         return False
         
     def execute(self) -> bool:
@@ -789,10 +789,7 @@ class SyncEngine:
                 all_data = []  # 保存所有数据用于更新last_sync_value
                 
                 for row in result:
-                    # 检查任务是否被取消
-                    if self._check_if_cancelled():
-                        self._update_log(f"表 {full_table_name} 数据同步被用户取消")
-                        raise ValueError("Task cancelled by user")
+
                         
                     record = dict(zip(columns, row))
                     batch_data.append(record)
@@ -1680,6 +1677,71 @@ class SyncEngine:
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
+# def execute_sync_job(job_id: int, progress_callback: Optional[callable] = None) -> bool:
+#     """
+#     执行同步任务的入口函数
+    
+#     Args:
+#         job_id: 任务ID
+#         progress_callback: 进度回调函数
+        
+#     Returns:
+#         bool: 执行是否成功
+#     """
+#     try:
+#         # 获取任务信息
+#         db = SessionLocal()
+#         try:
+#             job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+#             if not job:
+#                 logger.error(f"Job {job_id} not found")
+#                 return False
+            
+#             # 检查任务是否已在运行
+#             if job.is_running:
+#                 logger.warning(f"Job {job_id} is already running, skipping")
+#                 return False
+            
+#             # 标记任务为运行中
+#             job.is_running = True
+#             db.commit()
+            
+#         finally:
+#             db.close()
+        
+#         # 执行同步
+#         sync_engine = SyncEngine(job_id, progress_callback)
+#         success = sync_engine.execute()
+        
+#         # 更新任务状态
+#         db = SessionLocal()
+#         try:
+#             job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+#             if job:
+#                 job.is_running = False
+#                 db.commit()
+#         finally:
+#             db.close()
+        
+#         return success
+        
+#     except Exception as e:
+#         logger.error(f"Failed to execute sync job {job_id}: {e}")
+        
+#         # 确保清除运行状态
+#         try:
+#             db = SessionLocal()
+#             try:
+#                 job = db.query(BackupJob).filter(BackupJob.id == job_id).first()
+#                 if job:
+#                     job.is_running = False
+#                     db.commit()
+#             finally:
+#                 db.close()
+#         except:
+#             pass
+        
+#         return False
 def execute_sync_job(job_id: int, progress_callback: Optional[callable] = None) -> bool:
     """
     执行同步任务的入口函数
@@ -1712,9 +1774,35 @@ def execute_sync_job(job_id: int, progress_callback: Optional[callable] = None) 
         finally:
             db.close()
         
-        # 执行同步
-        sync_engine = SyncEngine(job_id, progress_callback)
-        success = sync_engine.execute()
+        # ========== 选择同步引擎 ==========
+        # 方案1: 使用原始流式同步引擎 (注释掉下面的COPY模式代码来使用)
+        # sync_engine = SyncEngine(job_id, progress_callback)
+        # success = sync_engine.execute()
+        
+        # 方案2: 使用COPY高性能同步引擎 (取消注释下面的代码来使用)
+        try:
+            from sync.sync_engine_with_copy import EnhancedSyncEngine
+            from sync.transfer_config import TransferMode
+            
+            # 使用COPY模式的增强同步引擎
+            sync_engine = EnhancedSyncEngine(
+                job_id=job_id, 
+                progress_callback=progress_callback,
+                transfer_mode=TransferMode.COPY  # 强制使用COPY模式
+            )
+            logger.info(f"Job {job_id}: Using COPY mode for high performance sync")
+            success = sync_engine.execute()
+            
+        except ImportError as e:
+            logger.warning(f"COPY mode not available, falling back to stream mode: {e}")
+            # 回退到原始同步引擎
+            sync_engine = SyncEngine(job_id, progress_callback)
+            success = sync_engine.execute()
+        except Exception as e:
+            logger.error(f"COPY mode failed, falling back to stream mode: {e}")
+            # 回退到原始同步引擎
+            sync_engine = SyncEngine(job_id, progress_callback)
+            success = sync_engine.execute()
         
         # 更新任务状态
         db = SessionLocal()

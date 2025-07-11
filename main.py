@@ -19,7 +19,7 @@ from sqlalchemy import text
 from config import settings
 from database import init_db
 from scheduler import scheduler_manager
-from routers import connections, jobs, logs, status
+from routers import connections, jobs, logs
 from database import engine
 from progress_manager import progress_manager
 # 配置日志
@@ -73,7 +73,7 @@ templates = Jinja2Templates(directory="templates")
 app.include_router(connections.router, prefix="/api/connections", tags=["connections"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
-app.include_router(status.router, prefix="/api/status", tags=["status"])
+
 
 # 前端路由
 @app.get("/", response_class=HTMLResponse)

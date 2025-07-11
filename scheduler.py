@@ -11,9 +11,9 @@ from config import settings
 from database import SessionLocal, engine
 from models.backup_jobs import BackupJob, JobStatus, ExecutionMode
 
-# from sync.sync_engine import execute_sync_job
+from sync.sync_engine import execute_sync_job
 
-from sync import execute_sync_job
+#from sync import execute_sync_job
 
 
 

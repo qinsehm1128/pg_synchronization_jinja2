@@ -13,8 +13,8 @@ from scheduler import scheduler_manager
 from progress_manager import progress_manager
 
 # 立即执行任务
-# from sync.sync_engine import execute_sync_job
-from sync import execute_sync_job
+from sync.sync_engine import execute_sync_job
+#from sync import execute_sync_job
 import threading
 
 
